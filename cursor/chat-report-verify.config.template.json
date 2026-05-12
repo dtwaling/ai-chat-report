@@ -1,0 +1,11 @@
+{
+  "_comment": "Copy to chat-report-verify.config.json and fill in UUIDs from your local Cursor instance.",
+  "chatId": "PASTE-A-KNOWN-CHAT-ID-HERE",
+  "requestId": "PASTE-A-REQUEST-ID-THAT-EXISTS-IN-AI-CODE-HASHES",
+  "requestIdNoHashes": "PASTE-A-REQUEST-ID-WITH-NO-AI-CODE-HASHES-OR-LEAVE-NULL",
+  "chatIdsForAggregate": [
+    "CHAT-ID-1",
+    "CHAT-ID-2",
+    "CHAT-ID-3"
+  ]
+}
