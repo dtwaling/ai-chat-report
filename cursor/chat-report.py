@@ -2161,6 +2161,68 @@ def build_locked_report(
     return out
 
 
+def build_locked_aggregate_report(reports: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build a section-4.3-conformant aggregate from N locked single-chat reports.
+
+    Sums ``aggregates.by_class`` and ``total_tool_calls`` across all input
+    sessions, recomputes ``success_metric_components`` against the summed
+    counts, flattens denials and errors with their originating ``session_id``,
+    and embeds per-session snippets so consumers can drill into specifics.
+    """
+    by_class: dict[str, int] = {k: 0 for k in _LOCKED_TOOL_CLASSES}
+    informed_total = 0
+    uninformed_total = 0
+    denials: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    sessions: list[dict[str, Any]] = []
+    total_tool_calls = 0
+    ide = "cursor"
+
+    for rpt in reports:
+        ide = rpt.get("ide", ide)
+        aggs = rpt.get("aggregates", {})
+        total_tool_calls += int(aggs.get("total_tool_calls", 0))
+        for k, v in aggs.get("by_class", {}).items():
+            by_class[k] = by_class.get(k, 0) + int(v)
+        smc_b = aggs.get("success_metric_components", {}).get("component_b", {})
+        informed_total += int(smc_b.get("informed_count", 0))
+        uninformed_total += int(smc_b.get("uninformed_count", 0))
+        sess_id = rpt.get("session_id", "")
+        for d in aggs.get("denials", []) or []:
+            d2 = dict(d)
+            d2["session_id"] = sess_id
+            denials.append(d2)
+        for e in aggs.get("errors", []) or []:
+            e2 = dict(e)
+            e2["session_id"] = sess_id
+            errors.append(e2)
+        sessions.append({
+            "session_id": sess_id,
+            "session_id_normalized": rpt.get("session_id_normalized", ""),
+            "aggregates": aggs,
+        })
+
+    success_metrics = compute_success_metric_components(
+        by_class, informed_total, uninformed_total,
+    )
+
+    return {
+        "report_version": LOCKED_REPORT_VERSION,
+        "report_kind": "aggregate",
+        "ide": ide,
+        "generated_at_iso": datetime.now(timezone.utc).isoformat(),
+        "session_count": len(reports),
+        "sessions": sessions,
+        "aggregates": {
+            "total_tool_calls": total_tool_calls,
+            "by_class": by_class,
+            "success_metric_components": success_metrics,
+            "denials": denials,
+            "errors": errors,
+        },
+    }
+
+
 def _safe_ratio_delta(before: float, after: float) -> float:
     """Compute ``after - before`` for ratios that may be inf.
 
@@ -2363,37 +2425,61 @@ def _run_aggregate_mode(
 ) -> int:
     """Aggregate mode: rollup across N chats. Returns rc (0 ok, 1 if any
     chat skipped or no valid chats)."""
-    if shape == "locked":
-        raise NotImplementedError(
-            "locked-shape aggregate mode is deferred to commit 3 of Part A. "
-            "Use --shape=legacy for aggregate output until then."
-        )
     if len(resolved) < 1:
         print("ERROR: --aggregate requires at least one ID", file=sys.stderr)
         return 1
 
     print(f"[chat-report] aggregate: {len(resolved)} chats")
     rc = 0
-    reports: list[dict] = []
+    legacy_reports: list[dict] = []
+    locked_reports: list[dict] = []
     for chat_id, input_id, source in resolved:
         rpt = build_report(chat_id, state_con, track_con, tools, input_id, source)
         if rpt is None:
             print(f"  SKIP — no data for chat {chat_id}", file=sys.stderr)
             rc = 1
             continue
-        rpt.pop("_orderedRaw", None)
-        reports.append(rpt)
+        ordered = rpt.pop("_orderedRaw", None) or []
+        rpt.pop("_perToolRollup", None)
+        if shape == "locked":
+            rows = build_bubble_rows(ordered)
+            locked_reports.append(build_locked_report(
+                chat_id, rpt["meta"], rows, ordered,
+                input_id=input_id, resolved_from=source, filter_category=tools,
+            ))
+        else:
+            legacy_reports.append(rpt)
 
-    if not reports:
+    if shape != "locked" and not legacy_reports:
+        print("ERROR: no valid chats to aggregate", file=sys.stderr)
+        return 1
+    if shape == "locked" and not locked_reports:
         print("ERROR: no valid chats to aggregate", file=sys.stderr)
         return 1
 
-    agg = build_aggregate_report(reports, tools)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     stem = f"aggregate-{ts}"
     md_path = out_dir / f"{stem}.md"
     json_path = out_dir / f"{stem}.json"
 
+    if shape == "locked":
+        agg = build_locked_aggregate_report(locked_reports)
+        if fmt in ("json", "both"):
+            write_json_report(json_path, agg)
+            print(f"  wrote {json_path}")
+        if fmt in ("md", "both"):
+            print("  note: --shape=locked markdown output is deferred to commit 4; "
+                  "JSON written above", file=sys.stderr)
+        aggs = agg["aggregates"]
+        smc = aggs["success_metric_components"]
+        print(
+            f"  sessions={agg['session_count']} tools={aggs['total_tool_calls']} "
+            f"componentA_pass={smc['component_a']['pass']} "
+            f"componentB_pass={smc['component_b']['pass']}"
+        )
+        return rc
+
+    agg = build_aggregate_report(legacy_reports, tools)
     if fmt in ("md", "both"):
         write_aggregate_md(md_path, agg)
         print(f"  wrote {md_path}")
