@@ -34,7 +34,9 @@ from claudecode._classify import classify_tool_class_claudecode
 from claudecode._jsonl import (
     PairedToolCall,
     Turn,
+    collect_tool_uses,
     extract_user_prompt_text,
+    iter_records,
     pair_tool_calls,
     partition_into_turns,
     unknown_record_types,
@@ -410,11 +412,86 @@ def _build_aggregates(
 # ---------------------------------------------------------------------------
 
 
+_LOCKED_CLASSES_ZERO: tuple[str, ...] = (
+    "broad-sweep-read", "broad-sweep-grep", "broad-sweep-glob",
+    "optimus-mcp", "directory-index-read",
+    "edit", "write", "bash", "other",
+)
+
+
+def _zero_by_class() -> dict[str, int]:
+    return {k: 0 for k in _LOCKED_CLASSES_ZERO}
+
+
+def build_subagent_rollup(subagents_dir: Path | None) -> dict[str, Any] | None:
+    """Walk ``<session-uuid>/subagents/`` and return per-subagent tool-call counts.
+
+    Returns ``None`` when no subagents are present (dir absent or empty).
+    When present, returns the ``aggregates.subagent_rollup`` additive shape:
+
+        {
+            "total_subagent_calls": <int>,
+            "subagents": [
+                {
+                    "agent_id": "<id>",
+                    "agent_type": "<type-from-meta-or-empty>",
+                    "description": "<desc-from-meta-or-empty>",
+                    "by_class": {<class>: <count>, ...},
+                },
+                ...
+            ],
+        }
+
+    Per DISCOVERY.md consideration #4 (PM-signed-off 2026-05-12): the
+    primary session's ``aggregates.by_class`` is NOT augmented; subagent
+    tool calls are tracked separately so the success metric reflects
+    main-agent behavior.
+    """
+    if subagents_dir is None or not subagents_dir.is_dir():
+        return None
+    jsonls = sorted(subagents_dir.glob("agent-*.jsonl"))
+    if not jsonls:
+        return None
+
+    subagents: list[dict[str, Any]] = []
+    total = 0
+    for jp in jsonls:
+        agent_id = jp.stem.removeprefix("agent-")
+        by_class = _zero_by_class()
+        for rec in iter_records(jp):
+            for ublock in collect_tool_uses(rec):
+                cls = classify_tool_class_claudecode(
+                    ublock.get("name", ""), ublock.get("input"),
+                )
+                by_class[cls] = by_class.get(cls, 0) + 1
+                total += 1
+        meta_path = subagents_dir / f"agent-{agent_id}.meta.json"
+        agent_type = ""
+        description = ""
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                if isinstance(meta, dict):
+                    agent_type = str(meta.get("agentType", "") or "")
+                    description = str(meta.get("description", "") or "")
+            except (OSError, json.JSONDecodeError):
+                pass
+        subagents.append({
+            "agent_id": agent_id,
+            "agent_type": agent_type,
+            "description": description,
+            "by_class": by_class,
+        })
+
+    return {"total_subagent_calls": total, "subagents": subagents}
+
+
 def build_locked_report(
     records: Iterable[dict[str, Any]],
     *,
     session_id_override: str | None = None,
     ide_version_override: str | None = None,
+    subagents_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Build a locked-shape single-chat report from a record stream.
 
@@ -426,6 +503,11 @@ def build_locked_report(
     sample 297-record session in DISCOVERY.md, ~MB scale for hour-long
     sessions. If single-pass streaming becomes necessary, restructure as
     one combined visitor.
+
+    ``subagents_dir`` -- when provided and non-empty, populates the
+    additive ``aggregates.subagent_rollup`` field (DISCOVERY.md #4).
+    Pass via ``claudecode._paths.subagents_dir_from_jsonl`` from the CLI
+    or via ``subagents_dir`` from the path-resolver helpers.
     """
     records = list(records)
 
@@ -458,6 +540,9 @@ def build_locked_report(
 
     start, end, duration = _session_time_span(records)
     aggregates = _build_aggregates(locked_turns)
+    rollup = build_subagent_rollup(subagents_dir)
+    if rollup is not None:
+        aggregates["subagent_rollup"] = rollup
 
     warnings: list[dict[str, str]] = []
     if spans_upgrade:

@@ -56,7 +56,10 @@ from common._diff_aggregate import (  # noqa: E402
 )
 
 from claudecode._jsonl import iter_records  # noqa: E402
-from claudecode._paths import session_jsonl_path  # noqa: E402
+from claudecode._paths import (  # noqa: E402
+    session_jsonl_path,
+    subagents_dir_from_jsonl,
+)
 from claudecode._report import (  # noqa: E402
     build_locked_report,
     write_locked_json_report,
@@ -154,36 +157,39 @@ def _not_found_msg(path: Path) -> str:
     )
 
 
-def _load_records_or_exit_code(
+def _load_session_or_exit_code(
     session_id: str, args: argparse.Namespace, *, index: int = 0,
-) -> tuple[list[dict] | None, int]:
-    """Load records for one session. Returns (records, rc).
+) -> tuple[list[dict] | None, Path | None, int]:
+    """Load records + resolve subagents dir for one session.
 
-    On error: returns (None, 2) after writing to stderr.
-    On success: returns (records, 0).
+    On error: returns (None, None, 2) after writing to stderr.
+    On success: returns (records, subagents_dir, 0). ``subagents_dir`` is
+    always paired with the JSONL path; existence is checked downstream.
     """
     try:
         jsonl_path = _resolve_jsonl_path(session_id, args, index=index)
     except IndexError as exc:
         sys.stderr.write(f"chat-report: {exc}\n")
-        return None, 2
+        return None, None, 2
     if not jsonl_path.exists():
         sys.stderr.write(_not_found_msg(jsonl_path))
-        return None, 2
+        return None, None, 2
     records = list(iter_records(jsonl_path))
     if not records:
         sys.stderr.write(
             f"chat-report: session JSONL is empty: {jsonl_path}\n"
         )
-        return None, 2
-    return records, 0
+        return None, None, 2
+    return records, subagents_dir_from_jsonl(jsonl_path), 0
 
 
 def _run_single(session_id: str, args: argparse.Namespace) -> int:
-    records, rc = _load_records_or_exit_code(session_id, args, index=0)
+    records, sub_dir, rc = _load_session_or_exit_code(session_id, args, index=0)
     if records is None:
         return rc
-    report = build_locked_report(records, session_id_override=session_id)
+    report = build_locked_report(
+        records, session_id_override=session_id, subagents_dir=sub_dir,
+    )
 
     out_dir: Path = args.out
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -206,15 +212,19 @@ def _run_diff(args: argparse.Namespace) -> int:
         return 2
     sid_a, sid_b = args.ids
 
-    records_a, rc = _load_records_or_exit_code(sid_a, args, index=0)
+    records_a, sub_a, rc = _load_session_or_exit_code(sid_a, args, index=0)
     if records_a is None:
         return rc
-    records_b, rc = _load_records_or_exit_code(sid_b, args, index=1)
+    records_b, sub_b, rc = _load_session_or_exit_code(sid_b, args, index=1)
     if records_b is None:
         return rc
 
-    before = build_locked_report(records_a, session_id_override=sid_a)
-    after = build_locked_report(records_b, session_id_override=sid_b)
+    before = build_locked_report(
+        records_a, session_id_override=sid_a, subagents_dir=sub_a,
+    )
+    after = build_locked_report(
+        records_b, session_id_override=sid_b, subagents_dir=sub_b,
+    )
     diff = build_locked_diff_report(before, after)
 
     out_dir: Path = args.out
@@ -234,10 +244,12 @@ def _run_aggregate(args: argparse.Namespace) -> int:
     """Aggregate mode: rollup across N sessions."""
     reports: list[dict] = []
     for index, sid in enumerate(args.ids):
-        records, rc = _load_records_or_exit_code(sid, args, index=index)
+        records, sub_dir, rc = _load_session_or_exit_code(sid, args, index=index)
         if records is None:
             return rc
-        reports.append(build_locked_report(records, session_id_override=sid))
+        reports.append(build_locked_report(
+            records, session_id_override=sid, subagents_dir=sub_dir,
+        ))
     agg = build_locked_aggregate_report(reports)
 
     out_dir: Path = args.out
