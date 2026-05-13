@@ -2639,6 +2639,21 @@ def build_locked_diff_report(
     }
 
 
+def _warn_if_legacy_shape(shape: str) -> None:
+    """Emit a one-line DeprecationWarning to stderr when --shape=legacy is used.
+
+    The locked shape (MISSION-BRIEF section 4) is the default as of PR-A2;
+    legacy continues to work during a deprecation window so existing
+    consumers can migrate without breakage.
+    """
+    if shape == "legacy":
+        print(
+            "DeprecationWarning: --shape=legacy will be removed in a future "
+            "release; the locked shape is now the default.",
+            file=sys.stderr,
+        )
+
+
 def _build_argparser() -> argparse.ArgumentParser:
     """Construct the chat-report argparse.ArgumentParser."""
     ap = argparse.ArgumentParser(
@@ -2660,9 +2675,10 @@ def _build_argparser() -> argparse.ArgumentParser:
 
     ap.add_argument("--tools", choices=("all", "mcp", "optimus"), default="all",
                     help="Which tool calls to include (default: all)")
-    ap.add_argument("--shape", choices=("legacy", "locked"), default="legacy",
-                    help="Output JSON shape: 'legacy' (current) or 'locked' "
-                         "(MISSION-BRIEF section 4 contract). Default: legacy.")
+    ap.add_argument("--shape", choices=("legacy", "locked"), default="locked",
+                    help="Output JSON shape: 'locked' (MISSION-BRIEF section 4 "
+                         "contract, default) or 'legacy' (deprecated, will be "
+                         "removed in a future release).")
     ap.add_argument("--format", choices=("md", "json", "both"), default="both",
                     help="Output format (default: both)")
     ap.add_argument("--dump-bubbles", action="store_true",
@@ -2939,6 +2955,8 @@ def _resolve_input_ids(
 def main(argv: list[str] | None = None) -> int:
     ap = _build_argparser()
     args = ap.parse_args(argv)
+
+    _warn_if_legacy_shape(args.shape)
 
     if args.diff:
         mode = "diff"
