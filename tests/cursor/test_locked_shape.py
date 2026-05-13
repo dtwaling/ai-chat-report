@@ -435,17 +435,6 @@ def test_cli_shape_flag_rejects_other_values(chat_report):
         chat_report._build_argparser().parse_args(["--shape", "bogus", "some-uuid"])
 
 
-def test_diff_mode_with_locked_shape_raises_not_implemented(chat_report, tmp_path):
-    """Diff mode is deferred to commit 2 -- emit a clear NotImplementedError now."""
-    with pytest.raises(NotImplementedError, match="locked-shape diff"):
-        chat_report._run_diff_mode(
-            resolved=[("a", "a", None), ("b", "b", None)],
-            state_con=None, track_con=None,
-            tools="all", fmt="json", out_dir=tmp_path,
-            shape="locked",
-        )
-
-
 def test_aggregate_mode_with_locked_shape_raises_not_implemented(chat_report, tmp_path):
     """Aggregate mode is deferred to commit 3 -- emit a clear NotImplementedError now."""
     with pytest.raises(NotImplementedError, match="locked-shape aggregate"):

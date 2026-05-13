@@ -2161,6 +2161,81 @@ def build_locked_report(
     return out
 
 
+def _safe_ratio_delta(before: float, after: float) -> float:
+    """Compute ``after - before`` for ratios that may be inf.
+
+    ``inf - inf`` -> 0 (no change); finite cases pass through. Always
+    ``allow_nan=True``-serializable.
+    """
+    import math as _math
+    if _math.isinf(before) and _math.isinf(after):
+        return 0.0
+    return after - before
+
+
+def build_locked_diff_report(
+    before: dict[str, Any],
+    after: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a section-4.4-conformant diff report from two locked single-chat reports.
+
+    ``before`` and ``after`` are the dicts returned by :func:`build_locked_report`.
+    The diff is ``after - before`` per aggregate counter and per Component A/B
+    ratio. Same versioning as the single-chat shape.
+    """
+    bef_aggs = before.get("aggregates", {})
+    aft_aggs = after.get("aggregates", {})
+    bef_by_class = bef_aggs.get("by_class", {})
+    aft_by_class = aft_aggs.get("by_class", {})
+    by_class_delta = {
+        k: int(aft_by_class.get(k, 0)) - int(bef_by_class.get(k, 0))
+        for k in _LOCKED_TOOL_CLASSES
+    }
+
+    bef_a = bef_aggs.get("success_metric_components", {}).get("component_a", {})
+    aft_a = aft_aggs.get("success_metric_components", {}).get("component_a", {})
+    bef_b = bef_aggs.get("success_metric_components", {}).get("component_b", {})
+    aft_b = aft_aggs.get("success_metric_components", {}).get("component_b", {})
+
+    delta = {
+        "total_tool_calls": int(aft_aggs.get("total_tool_calls", 0))
+                          - int(bef_aggs.get("total_tool_calls", 0)),
+        "by_class": by_class_delta,
+        "component_a": {
+            "optimus_count_delta":
+                int(aft_a.get("optimus_count", 0)) - int(bef_a.get("optimus_count", 0)),
+            "broad_sweep_count_delta":
+                int(aft_a.get("broad_sweep_count", 0)) - int(bef_a.get("broad_sweep_count", 0)),
+            "ratio_delta": _safe_ratio_delta(
+                float(bef_a.get("ratio", 0.0)), float(aft_a.get("ratio", 0.0)),
+            ),
+            "pass_before": bool(bef_a.get("pass", False)),
+            "pass_after": bool(aft_a.get("pass", False)),
+        },
+        "component_b": {
+            "informed_count_delta":
+                int(aft_b.get("informed_count", 0)) - int(bef_b.get("informed_count", 0)),
+            "uninformed_count_delta":
+                int(aft_b.get("uninformed_count", 0)) - int(bef_b.get("uninformed_count", 0)),
+            "ratio_delta": _safe_ratio_delta(
+                float(bef_b.get("ratio", 0.0)), float(aft_b.get("ratio", 0.0)),
+            ),
+            "pass_before": bool(bef_b.get("pass", False)),
+            "pass_after": bool(aft_b.get("pass", False)),
+        },
+    }
+
+    return {
+        "report_version": LOCKED_REPORT_VERSION,
+        "report_kind": "diff",
+        "ide": before.get("ide", after.get("ide", "unknown")),
+        "generated_at_iso": datetime.now(timezone.utc).isoformat(),
+        "before": before,
+        "after": after,
+        "delta": delta,
+    }
+
+
 def _build_argparser() -> argparse.ArgumentParser:
     """Construct the chat-report argparse.ArgumentParser."""
     ap = argparse.ArgumentParser(
@@ -2215,11 +2290,6 @@ def _run_diff_mode(
     shape: str = "legacy",
 ) -> int:
     """Diff mode: compare exactly two chats. Returns rc (0 ok, 1 on error)."""
-    if shape == "locked":
-        raise NotImplementedError(
-            "locked-shape diff mode is deferred to commit 2 of Part A. "
-            "Use --shape=legacy for diff output until then."
-        )
     if len(resolved) != 2:
         print("ERROR: --diff requires exactly two IDs", file=sys.stderr)
         return 1
@@ -2236,14 +2306,42 @@ def _run_diff_mode(
         print(f"  ERROR — no data for chat {chat_b}", file=sys.stderr)
         return 1
 
-    report_a.pop("_orderedRaw", None)
-    report_b.pop("_orderedRaw", None)
+    ordered_a = report_a.pop("_orderedRaw", None)
+    ordered_b = report_b.pop("_orderedRaw", None)
+    report_a.pop("_perToolRollup", None)
+    report_b.pop("_perToolRollup", None)
 
-    diff = build_diff_report(report_a, report_b, tools)
     stem = f"diff-{chat_a[:12]}-vs-{chat_b[:12]}"
     md_path = out_dir / f"{stem}.md"
     json_path = out_dir / f"{stem}.json"
 
+    if shape == "locked":
+        rows_a = build_bubble_rows(ordered_a or [])
+        rows_b = build_bubble_rows(ordered_b or [])
+        locked_a = build_locked_report(
+            chat_a, report_a["meta"], rows_a, ordered_a or [],
+            input_id=input_a, resolved_from=source_a, filter_category=tools,
+        )
+        locked_b = build_locked_report(
+            chat_b, report_b["meta"], rows_b, ordered_b or [],
+            input_id=input_b, resolved_from=source_b, filter_category=tools,
+        )
+        diff = build_locked_diff_report(locked_a, locked_b)
+        if fmt in ("json", "both"):
+            write_json_report(json_path, diff)
+            print(f"  wrote {json_path}")
+        if fmt in ("md", "both"):
+            print("  note: --shape=locked markdown output is deferred to commit 4; "
+                  "JSON written above", file=sys.stderr)
+        d = diff["delta"]
+        print(
+            f"  total_tools delta={d['total_tool_calls']:+d}"
+            f"  optimus delta={d['component_a']['optimus_count_delta']:+d}"
+            f"  broad_sweep delta={d['component_a']['broad_sweep_count_delta']:+d}"
+        )
+        return 0
+
+    diff = build_diff_report(report_a, report_b, tools)
     if fmt in ("md", "both"):
         write_diff_md(md_path, diff, report_a, report_b, tools)
         print(f"  wrote {md_path}")
