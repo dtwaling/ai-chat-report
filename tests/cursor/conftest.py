@@ -3,6 +3,10 @@
 The cursor variant's main script is ``cursor/chat-report.py`` which is not
 importable by name (hyphen). Tests load it via ``importlib`` and receive the
 module as a session-scoped fixture.
+
+The repo root is prepended to ``sys.path`` so the ``cursor`` package itself
+is importable -- this exposes underscore-named members like
+``cursor._locked_contract`` to tests.
 """
 
 from __future__ import annotations
@@ -15,6 +19,9 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CHAT_REPORT_PATH = _REPO_ROOT / "cursor" / "chat-report.py"
+
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 
 @pytest.fixture(scope="session")

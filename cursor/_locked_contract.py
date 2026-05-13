@@ -6,7 +6,12 @@ required-fields-with-types -- extra keys are tolerated per section 4.5
 
 Use ``assert_locked_single_chat_conforms(report)`` for single-chat reports,
 ``assert_locked_diff_conforms(diff)`` for diffs, and
-``assert_locked_aggregate_conforms(agg)`` for aggregates.
+``assert_locked_aggregate_conforms(agg)`` for aggregates. Each raises
+``AssertionError`` with a path-qualified message on the first violation.
+
+Shared module: imported by ``cursor/chat-report-verify.py`` for offline
+JSON validation and by ``tests/cursor/test_contract_conformance.py`` for
+shape-contract tests.
 """
 
 from __future__ import annotations
