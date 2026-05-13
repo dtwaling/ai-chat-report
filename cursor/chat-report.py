@@ -16,14 +16,19 @@ ID resolution: the CLI accepts any UUID — Request IDs (from Cursor UI) are
 resolved to chat IDs automatically via the tracking DB, with bubble-scan and
 direct chat-ID fallbacks. Use --request-id / --chat-id to force resolution.
 
-Data sources (both opened read-only):
-  1. %APPDATA%\\Cursor\\User\\globalStorage\\state.vscdb
-       - cursorDiskKV.composerData:<chatId>  → chat metadata
-       - cursorDiskKV.bubbleId:<chatId>:<bubbleId>  → per-turn data
-  2. %USERPROFILE%\\.cursor\\ai-tracking\\ai-code-tracking.db
-       - ai_code_hashes WHERE conversationId = <chatId>
-       - ai_deleted_files WHERE conversationId = <chatId>
-       - scored_commits (joined by time window)
+Data sources (both opened read-only). Default locations per host OS;
+override with --state-db / --tracking-db or CURSOR_STATE_DB /
+CURSOR_TRACKING_DB env vars.
+
+  1. Cursor state DB (chat history)
+       - Windows: %APPDATA%\\Cursor\\User\\globalStorage\\state.vscdb
+       - macOS:   ~/Library/Application Support/Cursor/User/globalStorage/state.vscdb
+       - Linux:   ~/.config/Cursor/User/globalStorage/state.vscdb  (or $XDG_CONFIG_HOME)
+       Keys: cursorDiskKV.composerData:<chatId>, cursorDiskKV.bubbleId:<chatId>:<bubbleId>
+
+  2. AI tracking DB (code attribution)
+       - All OS: ~/.cursor/ai-tracking/ai-code-tracking.db
+       Tables: ai_code_hashes, ai_deleted_files, scored_commits (joined by time)
 
 Outputs (default: .cursor/local/chat-reports/):
   <chatId>.md / .json              — single-chat report
@@ -49,18 +54,62 @@ from typing import Any, Iterable
 # Paths and config
 # ---------------------------------------------------------------------------
 
+def _home_dir() -> Path:
+    """OS-aware home dir. Reads %USERPROFILE% on Windows, $HOME elsewhere.
+
+    Intentionally does not use ``os.path.expanduser``: that function consults
+    Windows env vars (``USERPROFILE``) even when ``sys.platform`` claims
+    ``darwin``/``linux``, which makes cross-OS unit tests on Windows hosts
+    impossible to monkeypatch deterministically.
+    """
+    if sys.platform == "win32":
+        return Path(os.environ.get("USERPROFILE", ""))
+    return Path(os.environ.get("HOME", ""))
+
+
+def _cursor_user_dir() -> Path:
+    """Per-OS root for Cursor's User profile dir.
+
+    Cursor is a VS Code fork and inherits the same conventions:
+      - Windows: %APPDATA%\\Cursor\\User
+      - macOS:   ~/Library/Application Support/Cursor/User
+      - Linux:   ~/.config/Cursor/User  (or $XDG_CONFIG_HOME/Cursor/User)
+
+    Windows path empirically verified this project. macOS/Linux are
+    convention-based (VS Code fork inheritance) and gated by the
+    CURSOR_STATE_DB env-var override as the escape hatch.
+    """
+    if sys.platform == "win32":
+        return Path(os.path.expandvars(r"%APPDATA%\Cursor\User"))
+    if sys.platform == "darwin":
+        return _home_dir() / "Library" / "Application Support" / "Cursor" / "User"
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg) if xdg else _home_dir() / ".config"
+    return base / "Cursor" / "User"
+
+
+def _cursor_home_dir() -> Path:
+    """Per-OS root for Cursor's user-home tracking dir (~/.cursor).
+
+    The ai-tracking SQLite DB lives under ``~/.cursor/ai-tracking/`` on every
+    OS Cursor supports; only the home root differs (``%USERPROFILE%`` vs
+    ``$HOME``).
+    """
+    return _home_dir() / ".cursor"
+
+
 def _default_state_db() -> Path:
-    return Path(os.environ.get(
-        "CURSOR_STATE_DB",
-        os.path.expandvars(r"%APPDATA%\Cursor\User\globalStorage\state.vscdb"),
-    ))
+    override = os.environ.get("CURSOR_STATE_DB")
+    if override:
+        return Path(override)
+    return _cursor_user_dir() / "globalStorage" / "state.vscdb"
 
 
 def _default_tracking_db() -> Path:
-    return Path(os.environ.get(
-        "CURSOR_TRACKING_DB",
-        os.path.expandvars(r"%USERPROFILE%\.cursor\ai-tracking\ai-code-tracking.db"),
-    ))
+    override = os.environ.get("CURSOR_TRACKING_DB")
+    if override:
+        return Path(override)
+    return _cursor_home_dir() / "ai-tracking" / "ai-code-tracking.db"
 
 
 DEFAULT_OUT_DIR = Path(".cursor/local/chat-reports")
