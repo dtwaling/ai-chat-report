@@ -55,7 +55,12 @@ from typing import Any, Iterable
 # ---------------------------------------------------------------------------
 
 def _home_dir() -> Path:
-    """OS-aware home dir. Reads %USERPROFILE% on Windows, $HOME elsewhere.
+    """OS-aware home dir. Reads ``USERPROFILE`` on Windows, ``HOME`` elsewhere.
+
+    Raises ``ValueError`` with actionable guidance when the expected env var
+    is missing -- rather than silently returning ``Path("")`` (which would
+    root every downstream path at CWD and surface as a confusing "file not
+    found at .\\.cursor\\..." error from ``open_ro``).
 
     Intentionally does not use ``os.path.expanduser``: that function consults
     Windows env vars (``USERPROFILE``) even when ``sys.platform`` claims
@@ -63,8 +68,18 @@ def _home_dir() -> Path:
     impossible to monkeypatch deterministically.
     """
     if sys.platform == "win32":
-        return Path(os.environ.get("USERPROFILE", ""))
-    return Path(os.environ.get("HOME", ""))
+        var = "USERPROFILE"
+    else:
+        var = "HOME"
+    value = os.environ.get(var)
+    if not value:
+        raise ValueError(
+            f"environment variable {var} is not set; cannot resolve default "
+            f"Cursor paths. Set {var}, or supply the explicit paths via "
+            f"CURSOR_STATE_DB / CURSOR_TRACKING_DB env vars, or the "
+            f"--state-db / --tracking-db CLI flags."
+        )
+    return Path(value)
 
 
 def _cursor_user_dir() -> Path:
