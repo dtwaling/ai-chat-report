@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from cursor import _locked_contract as contract
+from common import _locked_contract as contract
 
 from . import _fixtures as fx
 from . import _sqlite_fixture as sqlfx
