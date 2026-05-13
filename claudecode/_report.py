@@ -418,7 +418,14 @@ def build_locked_report(
 ) -> dict[str, Any]:
     """Build a locked-shape single-chat report from a record stream.
 
-    Records are iterated once; large sessions stay memory-friendly.
+    The iterable is materialized to a list before processing: the builder
+    needs multiple passes (turn partitioning, session-id / version /
+    time-span extraction, unknown-record-type scanning) so a true single-
+    pass stream is not currently feasible. For large sessions, peak memory
+    is bounded by the full record set in dict form -- ~857 KB for the
+    sample 297-record session in DISCOVERY.md, ~MB scale for hour-long
+    sessions. If single-pass streaming becomes necessary, restructure as
+    one combined visitor.
     """
     records = list(records)
 

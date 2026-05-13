@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 # Make sibling packages importable when this script is run directly from

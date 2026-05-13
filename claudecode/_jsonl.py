@@ -15,9 +15,11 @@ DISCOVERY.md spelled out the on-disk format. This module exposes:
 
 The parser is deliberately tolerant: unknown record types are ignored
 (surfaced to callers via ``unknown_record_types(records)`` so the report
-layer can emit a warning code), malformed lines are skipped silently, and
-records that lack the metadata envelope are dropped from the iterator.
-The strict assertions live in the report layer, not here.
+layer can emit a warning code), and malformed lines (non-JSON, JSON that
+isn't an object) are skipped silently. The iterator yields every parseable
+JSON object verbatim -- envelope fields like ``type`` / ``timestamp`` /
+``sessionId`` are NOT validated here. Strict assertions and per-type
+filtering live in the report layer.
 """
 
 from __future__ import annotations
