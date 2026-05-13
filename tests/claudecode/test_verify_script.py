@@ -178,3 +178,83 @@ def test_validate_unknown_report_kind_returns_nonzero(tmp_path):
     assert result.returncode != 0
     combined = result.stderr + result.stdout
     assert "report_kind" in combined
+
+
+# ---------------------------------------------------------------------------
+# Integration mode wiring (subprocess-spawns chat-report.py + validates output)
+# ---------------------------------------------------------------------------
+
+def _write_synthetic_session(tmp_path: Path, sid: str) -> Path:
+    """Write a minimal claudecode JSONL session and return its path."""
+    records = [{**r, "sessionId": sid} for r in _minimal_records()]
+    jsonl = tmp_path / f"{sid}.jsonl"
+    fx.write_jsonl(jsonl, records)
+    return jsonl
+
+
+def _run_verify_with_config(config_path: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(_VERIFY_SCRIPT), "--config", str(config_path), *args],
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_integration_no_config_returns_nonzero(tmp_path):
+    """Default mode (no --validate) with missing config emits a helpful error."""
+    missing_cfg = tmp_path / "does-not-exist.json"
+
+    result = _run_verify_with_config(missing_cfg)
+
+    assert result.returncode != 0
+    combined = (result.stderr + result.stdout).lower()
+    # Must be the "config not found" error path, not an argparse usage error
+    assert "config not found" in combined or "config missing" in combined, combined
+
+
+def test_integration_good_synthetic_config_passes(tmp_path):
+    """End-to-end: synthetic JSONLs + config -> chat-report -> contract checks pass."""
+    sid_a = "11111111-1111-1111-1111-111111111111"
+    sid_b = "22222222-2222-2222-2222-222222222222"
+    jsonl_a = _write_synthetic_session(tmp_path, sid_a)
+    jsonl_b = _write_synthetic_session(tmp_path, sid_b)
+
+    cfg = {
+        "sessionId": sid_a,
+        "sessionJsonl": str(jsonl_a),
+        "sessionIdsForAggregate": [sid_a, sid_b],
+        "sessionJsonlsForAggregate": [str(jsonl_a), str(jsonl_b)],
+    }
+    cfg_path = tmp_path / "verify.config.json"
+    cfg_path.write_text(json.dumps(cfg))
+
+    result = _run_verify_with_config(cfg_path)
+
+    assert result.returncode == 0, (
+        f"rc={result.returncode}\nstdout={result.stdout}\nstderr={result.stderr}"
+    )
+    # Output should report the integration run summary
+    combined = result.stderr + result.stdout
+    assert "passed" in combined.lower()
+    # No "FAIL" lines should appear in the output
+    assert "[FAIL]" not in combined, combined
+
+
+def test_integration_reports_failure_on_corrupted_jsonl(tmp_path):
+    """A config pointing at a non-existent JSONL surfaces as a failed check.
+
+    The verify script does not crash; it records the failure and exits non-zero.
+    """
+    sid = "12345678-1234-1234-1234-123456789abc"
+    cfg = {
+        "sessionId": sid,
+        "sessionJsonl": str(tmp_path / "does-not-exist.jsonl"),
+    }
+    cfg_path = tmp_path / "verify.config.json"
+    cfg_path.write_text(json.dumps(cfg))
+
+    result = _run_verify_with_config(cfg_path)
+
+    assert result.returncode != 0
+    combined = result.stderr + result.stdout
+    assert "[FAIL]" in combined or "FAIL" in combined

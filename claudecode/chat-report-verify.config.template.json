@@ -1,0 +1,12 @@
+{
+  "_comment": "Copy to chat-report-verify.config.json and fill in UUIDs from your local claudecode instance under ~/.claude/projects/<sanitized-cwd>/. Use 'sessionJsonl' for an explicit path or 'cwd' to let the script resolve under ~/.claude/projects/.",
+  "sessionId": "PASTE-A-KNOWN-SESSION-UUID-HERE",
+  "sessionJsonl": null,
+  "cwd": null,
+  "sessionIdsForAggregate": [
+    "SESSION-UUID-1",
+    "SESSION-UUID-2",
+    "SESSION-UUID-3"
+  ],
+  "sessionJsonlsForAggregate": null
+}
