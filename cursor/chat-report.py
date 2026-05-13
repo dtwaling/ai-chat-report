@@ -2206,10 +2206,20 @@ def build_locked_aggregate_report(reports: list[dict[str, Any]]) -> dict[str, An
         by_class, informed_total, uninformed_total,
     )
 
+    # ide_version: unique value if all sessions agree, else "mixed", else "unknown".
+    versions = {r.get("ide_version", "") for r in reports if r.get("ide_version")}
+    if len(versions) == 1:
+        ide_version = next(iter(versions))
+    elif len(versions) > 1:
+        ide_version = "mixed"
+    else:
+        ide_version = "unknown"
+
     return {
         "report_version": LOCKED_REPORT_VERSION,
         "report_kind": "aggregate",
         "ide": ide,
+        "ide_version": ide_version,
         "generated_at_iso": datetime.now(timezone.utc).isoformat(),
         "session_count": len(reports),
         "sessions": sessions,
@@ -2564,10 +2574,15 @@ def build_locked_diff_report(
         },
     }
 
+    ide_version = before.get("ide_version") or after.get("ide_version") or "unknown"
+    if before.get("ide_version") and after.get("ide_version") and \
+       before["ide_version"] != after["ide_version"]:
+        ide_version = "mixed"
     return {
         "report_version": LOCKED_REPORT_VERSION,
         "report_kind": "diff",
         "ide": before.get("ide", after.get("ide", "unknown")),
+        "ide_version": ide_version,
         "generated_at_iso": datetime.now(timezone.utc).isoformat(),
         "before": before,
         "after": after,
