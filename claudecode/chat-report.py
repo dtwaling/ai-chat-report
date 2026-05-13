@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Make sibling packages importable when this script is run directly from
@@ -49,13 +50,17 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from common._diff_aggregate import build_locked_diff_report  # noqa: E402
+from common._diff_aggregate import (  # noqa: E402
+    build_locked_aggregate_report,
+    build_locked_diff_report,
+)
 
 from claudecode._jsonl import iter_records  # noqa: E402
 from claudecode._paths import session_jsonl_path  # noqa: E402
 from claudecode._report import (  # noqa: E402
     build_locked_report,
     write_locked_json_report,
+    write_locked_md_aggregate,
     write_locked_md_diff,
     write_locked_md_report,
 )
@@ -225,22 +230,44 @@ def _run_diff(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_aggregate(args: argparse.Namespace) -> int:
+    """Aggregate mode: rollup across N sessions."""
+    reports: list[dict] = []
+    for index, sid in enumerate(args.ids):
+        records, rc = _load_records_or_exit_code(sid, args, index=index)
+        if records is None:
+            return rc
+        reports.append(build_locked_report(records, session_id_override=sid))
+    agg = build_locked_aggregate_report(reports)
+
+    out_dir: Path = args.out
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stem = f"aggregate-{ts}"
+    if args.format in ("json", "both"):
+        write_locked_json_report(out_dir / f"{stem}.json", agg)
+    if args.format in ("md", "both"):
+        write_locked_md_aggregate(out_dir / f"{stem}.md", agg)
+    sys.stderr.write(
+        f"chat-report: wrote {args.format} for aggregate "
+        f"({agg['session_count']} sessions) to {out_dir}\n"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_argparser().parse_args(argv)
 
     if args.diff:
         return _run_diff(args)
     if args.aggregate:
-        raise NotImplementedError(
-            "Aggregate mode lands in PR-B3B commit 3. Same shape as --diff: "
-            "common.build_locked_aggregate_report over N single-chat reports."
-        )
+        return _run_aggregate(args)
 
     if len(args.ids) != 1:
         sys.stderr.write(
             "chat-report: single-chat mode takes exactly one session UUID. "
             "For multiple sessions use --diff (two) or --aggregate (one or "
-            "more) once those land in PR-B3B.\n"
+            "more).\n"
         )
         return 2
 

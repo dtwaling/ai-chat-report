@@ -142,15 +142,6 @@ def test_cli_session_id_override_in_report(claudecode_chat_report, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_cli_aggregate_raises_not_implemented(claudecode_chat_report, tmp_path):
-    """--aggregate is still deferred (lands in PR-B3B commit 3)."""
-    with pytest.raises(NotImplementedError, match="commit 3"):
-        claudecode_chat_report.main([
-            "a", "b", "c", "--aggregate",
-            "--session-jsonl", str(tmp_path / "x.jsonl"),
-        ])
-
-
 # ---------------------------------------------------------------------------
 # Multi-ID guard
 # ---------------------------------------------------------------------------

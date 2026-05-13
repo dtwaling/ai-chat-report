@@ -712,3 +712,88 @@ def write_locked_md_diff(path: Path, diff: dict[str, Any]) -> None:
     lines.append("")
 
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Aggregate markdown writer
+# ---------------------------------------------------------------------------
+
+
+def write_locked_md_aggregate(path: Path, agg: dict[str, Any]) -> None:
+    """Write the locked-shape aggregate report as markdown.
+
+    Layout mirrors ``cursor/chat-report.py::write_locked_md_aggregate``
+    for cross-IDE parity. Sections: per-session inventory table, summed
+    by-class block, summed success-metric snapshot.
+    """
+    aggs = agg.get("aggregates", {})
+    smc = aggs.get("success_metric_components", {})
+    a = smc.get("component_a", {})
+    b = smc.get("component_b", {})
+    o = smc.get("overall", {})
+
+    lines: list[str] = []
+    lines.append(
+        f"# Aggregate report ({agg.get('ide', '?')}): "
+        f"{agg.get('session_count', 0)} sessions"
+    )
+    lines.append("")
+    lines.append(f"- **IDE version:** `{agg.get('ide_version', '?')}`")
+    lines.append(f"- **Generated:** {agg.get('generated_at_iso', '?')}")
+    lines.append(f"- **Report version:** {agg.get('report_version', '?')}")
+    lines.append("")
+
+    lines.append("## Per-session inventory")
+    lines.append("")
+    lines.append("| session_id | total_tool_calls | optimus | broad-sweep | denials | errors |")
+    lines.append("|---|---:|---:|---:|---:|---:|")
+    for s in agg.get("sessions", []):
+        s_aggs = s.get("aggregates", {})
+        s_smc = s_aggs.get("success_metric_components", {})
+        bc = s_aggs.get("by_class", {})
+        broad = (
+            bc.get("broad-sweep-read", 0)
+            + bc.get("broad-sweep-grep", 0)
+            + bc.get("broad-sweep-glob", 0)
+        )
+        sid = s.get("session_id", "?") or "?"
+        lines.append(
+            f"| `{sid[:12]}` "
+            f"| {s_aggs.get('total_tool_calls', 0)} "
+            f"| {s_smc.get('component_a', {}).get('optimus_count', 0)} "
+            f"| {broad} "
+            f"| {len(s_aggs.get('denials') or [])} "
+            f"| {len(s_aggs.get('errors') or [])} |"
+        )
+    lines.append("")
+
+    lines.append("## Summed across all sessions -- counts by tool_class")
+    lines.append("")
+    lines.append("| tool_class | count |")
+    lines.append("|------------|------:|")
+    for cls in _TOOL_CLASS_ORDER:
+        lines.append(f"| `{cls}` | {aggs.get('by_class', {}).get(cls, 0)} |")
+    lines.append(f"| **total** | **{aggs.get('total_tool_calls', 0)}** |")
+    lines.append("")
+
+    lines.append("## Summed success-metric snapshot")
+    lines.append("")
+    lines.append(
+        f"- **Component A:** optimus={a.get('optimus_count', 0)} vs "
+        f"broad-sweep={a.get('broad_sweep_count', 0)} "
+        f"(ratio={_md_format_ratio(a.get('ratio'))}) -- "
+        f"**{_md_pass_glyph(a.get('pass'))}**"
+    )
+    lines.append(
+        f"- **Component B:** informed={b.get('informed_count', 0)} vs "
+        f"uninformed={b.get('uninformed_count', 0)} "
+        f"(ratio={_md_format_ratio(b.get('ratio'))}) -- "
+        f"**{_md_pass_glyph(b.get('pass'))}**"
+    )
+    lines.append(
+        f"- **Overall:** **{_md_pass_glyph(o.get('pass'))}**"
+        + (" (partial pass)" if o.get("partial_pass") else "")
+    )
+    lines.append("")
+
+    path.write_text("\n".join(lines), encoding="utf-8")
