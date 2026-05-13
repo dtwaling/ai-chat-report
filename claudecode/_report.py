@@ -634,3 +634,81 @@ def write_locked_md_report(path: Path, report: dict[str, Any]) -> None:
         lines.append("")
 
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Diff markdown writer
+# ---------------------------------------------------------------------------
+
+
+_TOOL_CLASS_ORDER: tuple[str, ...] = (
+    "broad-sweep-read", "broad-sweep-grep", "broad-sweep-glob",
+    "optimus-mcp", "directory-index-read",
+    "edit", "write", "bash", "other",
+)
+
+
+def write_locked_md_diff(path: Path, diff: dict[str, Any]) -> None:
+    """Write the locked-shape diff report as markdown.
+
+    Layout mirrors ``cursor/chat-report.py::write_locked_md_diff`` for
+    cross-IDE parity but uses the claudecode-local helpers
+    (``_md_pass_glyph`` / ``_md_format_ratio``) for visual consistency
+    within this variant. Diff is a section-4.4 shape; the math itself
+    lives in ``common/_diff_aggregate.py``.
+    """
+    before = diff.get("before", {})
+    after = diff.get("after", {})
+    delta = diff.get("delta", {})
+    bef_aggs = before.get("aggregates", {})
+    aft_aggs = after.get("aggregates", {})
+
+    lines: list[str] = []
+    lines.append(
+        f"# Diff report ({diff.get('ide', '?')}): "
+        f"`{(before.get('session_id') or '?')[:12]}` -> "
+        f"`{(after.get('session_id') or '?')[:12]}`"
+    )
+    lines.append("")
+    lines.append(f"- **IDE version:** `{diff.get('ide_version', '?')}`")
+    lines.append(f"- **Generated:** {diff.get('generated_at_iso', '?')}")
+    lines.append(f"- **Report version:** {diff.get('report_version', '?')}")
+    lines.append("")
+
+    lines.append("## Before vs After -- Summary")
+    lines.append("")
+    lines.append("| | Before | After | Delta |")
+    lines.append("|---|------:|-----:|-----:|")
+    lines.append(
+        f"| **total_tool_calls** | {bef_aggs.get('total_tool_calls', 0)} "
+        f"| {aft_aggs.get('total_tool_calls', 0)} "
+        f"| {delta.get('total_tool_calls', 0):+d} |"
+    )
+    for cls in _TOOL_CLASS_ORDER:
+        bef_v = bef_aggs.get("by_class", {}).get(cls, 0)
+        aft_v = aft_aggs.get("by_class", {}).get(cls, 0)
+        d_v = delta.get("by_class", {}).get(cls, 0)
+        lines.append(f"| `{cls}` | {bef_v} | {aft_v} | {d_v:+d} |")
+    lines.append("")
+
+    lines.append("## Success-metric deltas")
+    lines.append("")
+    da = delta.get("component_a", {})
+    db = delta.get("component_b", {})
+    lines.append(
+        f"- **Component A:** optimus={da.get('optimus_count_delta', 0):+d} / "
+        f"broad-sweep={da.get('broad_sweep_count_delta', 0):+d} -- "
+        f"ratio_delta={_md_format_ratio(da.get('ratio_delta'))} -- "
+        f"pass {_md_pass_glyph(da.get('pass_before'))} -> "
+        f"{_md_pass_glyph(da.get('pass_after'))}"
+    )
+    lines.append(
+        f"- **Component B:** informed={db.get('informed_count_delta', 0):+d} / "
+        f"uninformed={db.get('uninformed_count_delta', 0):+d} -- "
+        f"ratio_delta={_md_format_ratio(db.get('ratio_delta'))} -- "
+        f"pass {_md_pass_glyph(db.get('pass_before'))} -> "
+        f"{_md_pass_glyph(db.get('pass_after'))}"
+    )
+    lines.append("")
+
+    path.write_text("\n".join(lines), encoding="utf-8")
