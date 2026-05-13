@@ -13,9 +13,10 @@ from pathlib import Path
 
 import pytest
 
+from cursor import _locked_contract as contract
+
 from . import _fixtures as fx
 from . import _sqlite_fixture as sqlfx
-from . import _locked_contract as contract
 
 
 def _write_single_chat_fixture(tmp_path: Path, chat_id: str) -> tuple[Path, Path]:

@@ -420,9 +420,9 @@ def test_locked_report_round_trip_json_serializable(chat_report):
 # CLI plumbing
 # ---------------------------------------------------------------------------
 
-def test_cli_shape_flag_defaults_to_legacy(chat_report):
+def test_cli_shape_flag_defaults_to_locked(chat_report):
     args = chat_report._build_argparser().parse_args(["some-uuid"])
-    assert args.shape == "legacy"
+    assert args.shape == "locked"
 
 
 def test_cli_shape_flag_accepts_locked(chat_report):
