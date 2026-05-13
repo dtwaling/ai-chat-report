@@ -124,21 +124,46 @@ The full discovery + format spec is in `DISCOVERY.md`.
 
 ## Shape contract
 
-The full contract lives in `MISSION-BRIEF.md` section 4. Top-level
-fields in every JSON report:
+The full contract lives in `MISSION-BRIEF.md` section 4. Top-level fields
+differ by `report_kind`. The fields common to **all three** kinds:
 
 ```
 report_version: "1.0"             (string, always "1.0" for the current spec)
 report_kind:    "single-chat" | "diff" | "aggregate"
 ide:            "claude-code"     (always "claude-code" from this tool)
 ide_version:    string            ("mixed" in diff/aggregate when sessions differ)
+```
+
+### Single-chat top-level fields
+
+```
 session_id:     string            (raw)
 session_id_normalized: string     (lowercased, no separators -- cross-IDE join key)
 session_start_iso / session_end_iso / session_duration_s
-turns:          [...]             (single-chat only; diff/aggregate carry per-session reports)
+turns:          [...]             (per-turn detail)
 aggregates:     { ... }
 warnings:       [{code, message}, ...]
 ```
+
+### Diff top-level fields
+
+```
+before:           { ... }         (a full locked single-chat report)
+after:            { ... }         (a full locked single-chat report)
+delta:            { ... }         (total_tool_calls, by_class, component_a, component_b)
+generated_at_iso: string
+```
+
+### Aggregate top-level fields
+
+```
+session_count:    int             (matches len(sessions))
+sessions:         [ ... ]         (per-session {session_id, session_id_normalized, aggregates})
+aggregates:       { ... }         (summed across sessions)
+generated_at_iso: string
+```
+
+### Per-turn detail (single-chat only)
 
 Each `turn.tool_calls[i]` carries `call_index`, `tool_name`,
 `tool_class`, `input_summary` / `input_payload`,

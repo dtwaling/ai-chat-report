@@ -240,7 +240,7 @@ def test_integration_good_synthetic_config_passes(tmp_path):
     assert "[FAIL]" not in combined, combined
 
 
-def test_integration_reports_failure_on_corrupted_jsonl(tmp_path):
+def test_integration_reports_failure_on_missing_jsonl(tmp_path):
     """A config pointing at a non-existent JSONL surfaces as a failed check.
 
     The verify script does not crash; it records the failure and exits non-zero.
@@ -258,3 +258,39 @@ def test_integration_reports_failure_on_corrupted_jsonl(tmp_path):
     assert result.returncode != 0
     combined = result.stderr + result.stdout
     assert "[FAIL]" in combined or "FAIL" in combined
+
+
+# ---------------------------------------------------------------------------
+# Subagent rollup additive-omit check (helper unit tests)
+# ---------------------------------------------------------------------------
+
+def test_subagent_rollup_check_passes_when_key_absent(claudecode_verify_script):
+    """The additive-omit pattern: key not in aggregates -> pass (correct omit)."""
+    aggregates = {"by_class": {}, "total_tool_calls": 0}
+    ok, _, detail = claudecode_verify_script.check_subagent_rollup(aggregates)
+    assert ok, detail
+
+
+def test_subagent_rollup_check_fails_when_value_is_null(claudecode_verify_script):
+    """Spec disallows null: key present with null value must FAIL."""
+    aggregates = {"by_class": {}, "subagent_rollup": None}
+    ok, _, detail = claudecode_verify_script.check_subagent_rollup(aggregates)
+    assert not ok
+    assert "null" in detail.lower() or "none" in detail.lower()
+
+
+def test_subagent_rollup_check_passes_when_value_well_formed(claudecode_verify_script):
+    """A well-formed rollup dict passes."""
+    aggregates = {
+        "by_class": {},
+        "subagent_rollup": {"total_subagent_calls": 0, "subagents": []},
+    }
+    ok, _, detail = claudecode_verify_script.check_subagent_rollup(aggregates)
+    assert ok, detail
+
+
+def test_subagent_rollup_check_fails_when_value_malformed(claudecode_verify_script):
+    """A non-dict (or shape-violating) rollup must FAIL."""
+    aggregates = {"by_class": {}, "subagent_rollup": "not-a-dict"}
+    ok, _, detail = claudecode_verify_script.check_subagent_rollup(aggregates)
+    assert not ok, detail

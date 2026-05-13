@@ -18,20 +18,29 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CHAT_REPORT_PATH = _REPO_ROOT / "claudecode" / "chat-report.py"
+_VERIFY_SCRIPT_PATH = _REPO_ROOT / "claudecode" / "chat-report-verify.py"
 
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 
+def _load_module(modname: str, path: Path):
+    spec = importlib.util.spec_from_file_location(modname, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not load module at {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[modname] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 @pytest.fixture(scope="session")
 def claudecode_chat_report():
     """Load ``claudecode/chat-report.py`` as a module."""
-    spec = importlib.util.spec_from_file_location(
-        "claudecode_chat_report", _CHAT_REPORT_PATH,
-    )
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"could not load chat-report.py at {_CHAT_REPORT_PATH}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["claudecode_chat_report"] = module
-    spec.loader.exec_module(module)
-    return module
+    return _load_module("claudecode_chat_report", _CHAT_REPORT_PATH)
+
+
+@pytest.fixture(scope="session")
+def claudecode_verify_script():
+    """Load ``claudecode/chat-report-verify.py`` as a module."""
+    return _load_module("claudecode_verify_script", _VERIFY_SCRIPT_PATH)

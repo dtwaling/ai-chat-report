@@ -107,6 +107,43 @@ def _check_locked(validator, payload: dict[str, Any]) -> tuple[bool, str]:
     return True, ""
 
 
+def check_subagent_rollup(
+    aggregates: dict[str, Any],
+) -> tuple[bool, str, str]:
+    """Inspect ``aggregates.subagent_rollup`` against the additive contract.
+
+    Returns ``(ok, check_name, detail)``. The contract (DISCOVERY.md #4):
+
+    * Key absent: PASS -- the additive-omit pattern is honored.
+    * Key present, value is ``None``: FAIL -- the spec disallows ``null``
+      emission. A regression that emits ``"subagent_rollup": null`` must
+      surface as a check failure.
+    * Key present, value is a dict with the expected shape: PASS.
+    * Key present, anything else: FAIL.
+
+    The presence check uses ``in``, not ``.get(...)``, precisely so the
+    null case is distinguishable from the omit case.
+    """
+    if "subagent_rollup" not in aggregates:
+        return True, ("subagent_rollup omitted when no subagents"
+                      " (additive omit honored)"), ""
+    rollup = aggregates["subagent_rollup"]
+    if rollup is None:
+        return (
+            False,
+            "subagent_rollup must be omitted when absent, not null",
+            "spec disallows null emission; key present with None violates DISCOVERY.md #4",
+        )
+    ok = (
+        isinstance(rollup, dict)
+        and "total_subagent_calls" in rollup
+        and isinstance(rollup.get("subagents"), list)
+    )
+    if not ok:
+        return False, "subagent_rollup shape conformance", f"rollup={rollup!r}"
+    return True, "subagent_rollup shape conformance", ""
+
+
 def _single_args(sid: str, session_jsonl: str | None, cwd: str | None) -> list[str]:
     """Build positional + path-resolution args for single-mode invocation."""
     args = [sid]
@@ -199,19 +236,8 @@ def run_integration(cfg: dict[str, Any]) -> int:
             print("\n[Test 2] Subagent rollup additive behavior")
             data = json.loads(json_file.read_text(encoding="utf-8"))
             agg = data.get("aggregates", {})
-            rollup = agg.get("subagent_rollup")
-            if rollup is None:
-                check("subagent_rollup omitted when no subagents", True,
-                      "no rollup attached (additive omit honored)")
-            else:
-                # When present, must carry the expected shape.
-                ok = (
-                    isinstance(rollup, dict)
-                    and "total_subagent_calls" in rollup
-                    and isinstance(rollup.get("subagents"), list)
-                )
-                check("subagent_rollup shape conformance", ok,
-                      f"rollup={rollup!r}" if not ok else "")
+            ok, name, detail = check_subagent_rollup(agg)
+            check(name, ok, detail)
 
         # --- Test 3: Invalid session UUID error path ---
         print("\n[Test 3] Invalid session UUID error path")
