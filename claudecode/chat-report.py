@@ -9,8 +9,8 @@ script, read the report.
 
 Modes:
   Single-chat (default)  -- per-session report
-  --diff <idA> <idB>     -- before/after comparison (deferred to PR-B3B)
-  --aggregate <id> ...   -- rollup across N sessions (deferred to PR-B3B)
+  --diff <idA> <idB>     -- before/after comparison between two sessions
+  --aggregate <id> ...   -- rollup across N sessions
 
 Source: Claude Code's on-disk JSONL store. Path layout per DISCOVERY.md
 Q1:
@@ -27,9 +27,10 @@ Common invocations:
   # Single session in the current working dir
   python claudecode/chat-report.py <session-uuid>
 
-  # Direct path to a JSONL file (skips cwd resolution)
-  python claudecode/chat-report.py <session-uuid> \\
-      --session-jsonl ~/.claude/projects/foo/abc.jsonl
+  # Diff two sessions (one --session-jsonl per id, in order)
+  python claudecode/chat-report.py <id-a> <id-b> --diff \\
+      --session-jsonl ~/.claude/projects/foo/<id-a>.jsonl \\
+      --session-jsonl ~/.claude/projects/foo/<id-b>.jsonl
 
   # Custom output dir + format
   python claudecode/chat-report.py <session-uuid> \\
@@ -40,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Make sibling packages importable when this script is run directly from
@@ -48,11 +50,21 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from common._diff_aggregate import (  # noqa: E402
+    build_locked_aggregate_report,
+    build_locked_diff_report,
+)
+
 from claudecode._jsonl import iter_records  # noqa: E402
-from claudecode._paths import session_jsonl_path  # noqa: E402
+from claudecode._paths import (  # noqa: E402
+    session_jsonl_path,
+    subagents_dir_from_jsonl,
+)
 from claudecode._report import (  # noqa: E402
     build_locked_report,
     write_locked_json_report,
+    write_locked_md_aggregate,
+    write_locked_md_diff,
     write_locked_md_report,
 )
 
@@ -77,8 +89,10 @@ def _build_argparser() -> argparse.ArgumentParser:
              "Defaults to the current working directory.",
     )
     p.add_argument(
-        "--session-jsonl", default=None, type=Path,
-        help="Direct path to a session JSONL file. Overrides --cwd resolution.",
+        "--session-jsonl", action="append", default=None, dest="session_jsonl",
+        help="Direct path to a session JSONL file. Overrides --cwd resolution. "
+             "Repeat once per id in --diff / --aggregate modes (paired by "
+             "index with the positional ids).",
     )
     p.add_argument(
         "--out", default=str(DEFAULT_OUT_DIR), type=Path,
@@ -97,42 +111,85 @@ def _build_argparser() -> argparse.ArgumentParser:
     g = p.add_mutually_exclusive_group()
     g.add_argument(
         "--diff", action="store_true",
-        help="Diff mode: compare two sessions. Deferred to PR-B3B.",
+        help="Diff mode: compare two sessions. Requires exactly two positional ids.",
     )
     g.add_argument(
         "--aggregate", action="store_true",
-        help="Aggregate mode: rollup across N sessions. Deferred to PR-B3B.",
+        help="Aggregate mode: rollup across N sessions.",
     )
     return p
 
 
-def _resolve_jsonl_path(session_id: str, args: argparse.Namespace) -> Path:
-    if args.session_jsonl is not None:
-        return args.session_jsonl
+def _resolve_jsonl_path(
+    session_id: str,
+    args: argparse.Namespace,
+    *,
+    index: int = 0,
+) -> Path:
+    """Resolve the JSONL path for a given session id.
+
+    If ``--session-jsonl`` was passed, that list (paired by index with the
+    positional ids) wins. Otherwise resolve via ``--cwd`` /
+    ``CLAUDE_CONFIG_DIR``.
+
+    Raises ``IndexError`` when ``--session-jsonl`` was passed but doesn't
+    have a path for the requested index.
+    """
+    paths = args.session_jsonl
+    if paths:
+        if index >= len(paths):
+            raise IndexError(
+                f"--session-jsonl: expected {len(args.ids)} path(s) to pair "
+                f"with positional ids, got {len(paths)}."
+            )
+        return Path(paths[index])
     cwd = args.cwd if args.cwd is not None else str(Path.cwd())
     return session_jsonl_path(session_id, cwd)
 
 
-def _run_single(session_id: str, args: argparse.Namespace) -> int:
-    jsonl_path = _resolve_jsonl_path(session_id, args)
-    if not jsonl_path.exists():
-        sys.stderr.write(
-            f"chat-report: session JSONL not found: {jsonl_path}\n"
-            "  (Default retention is 30 days; check the cleanupPeriodDays "
-            "setting and that CLAUDE_CODE_SKIP_PROMPT_HISTORY was not set "
-            "for this session. Use --session-jsonl to point at an explicit "
-            "file.)\n"
-        )
-        return 2
+def _not_found_msg(path: Path) -> str:
+    return (
+        f"chat-report: session JSONL not found: {path}\n"
+        "  (Default retention is 30 days; check the cleanupPeriodDays "
+        "setting and that CLAUDE_CODE_SKIP_PROMPT_HISTORY was not set "
+        "for this session. Use --session-jsonl to point at an explicit "
+        "file.)\n"
+    )
 
+
+def _load_session_or_exit_code(
+    session_id: str, args: argparse.Namespace, *, index: int = 0,
+) -> tuple[list[dict] | None, Path | None, int]:
+    """Load records + resolve subagents dir for one session.
+
+    On error: returns (None, None, 2) after writing to stderr.
+    On success: returns (records, subagents_dir, 0). ``subagents_dir`` is
+    always paired with the JSONL path; existence is checked downstream.
+    """
+    try:
+        jsonl_path = _resolve_jsonl_path(session_id, args, index=index)
+    except IndexError as exc:
+        sys.stderr.write(f"chat-report: {exc}\n")
+        return None, None, 2
+    if not jsonl_path.exists():
+        sys.stderr.write(_not_found_msg(jsonl_path))
+        return None, None, 2
     records = list(iter_records(jsonl_path))
     if not records:
         sys.stderr.write(
             f"chat-report: session JSONL is empty: {jsonl_path}\n"
         )
-        return 2
+        return None, None, 2
+    return records, subagents_dir_from_jsonl(jsonl_path), 0
 
-    report = build_locked_report(records, session_id_override=session_id)
+
+def _run_single(session_id: str, args: argparse.Namespace) -> int:
+    records, sub_dir, rc = _load_session_or_exit_code(session_id, args, index=0)
+    if records is None:
+        return rc
+    report = build_locked_report(
+        records, session_id_override=session_id, subagents_dir=sub_dir,
+    )
 
     out_dir: Path = args.out
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -147,25 +204,94 @@ def _run_single(session_id: str, args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_diff(args: argparse.Namespace) -> int:
+    if len(args.ids) != 2:
+        sys.stderr.write(
+            "chat-report: --diff requires exactly two session UUIDs.\n"
+        )
+        return 2
+    sid_a, sid_b = args.ids
+
+    records_a, sub_a, rc = _load_session_or_exit_code(sid_a, args, index=0)
+    if records_a is None:
+        return rc
+    records_b, sub_b, rc = _load_session_or_exit_code(sid_b, args, index=1)
+    if records_b is None:
+        return rc
+
+    before = build_locked_report(
+        records_a, session_id_override=sid_a, subagents_dir=sub_a,
+    )
+    after = build_locked_report(
+        records_b, session_id_override=sid_b, subagents_dir=sub_b,
+    )
+    diff = build_locked_diff_report(before, after)
+
+    out_dir: Path = args.out
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"diff-{sid_a[:12]}-vs-{sid_b[:12]}"
+    if args.format in ("json", "both"):
+        write_locked_json_report(out_dir / f"{stem}.json", diff)
+    if args.format in ("md", "both"):
+        write_locked_md_diff(out_dir / f"{stem}.md", diff)
+    sys.stderr.write(
+        f"chat-report: wrote {args.format} for diff to {out_dir}\n"
+    )
+    return 0
+
+
+def _run_aggregate(args: argparse.Namespace) -> int:
+    """Aggregate mode: rollup across N sessions."""
+    reports: list[dict] = []
+    for index, sid in enumerate(args.ids):
+        records, sub_dir, rc = _load_session_or_exit_code(sid, args, index=index)
+        if records is None:
+            return rc
+        reports.append(build_locked_report(
+            records, session_id_override=sid, subagents_dir=sub_dir,
+        ))
+    agg = build_locked_aggregate_report(reports)
+
+    out_dir: Path = args.out
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stem = f"aggregate-{ts}"
+    if args.format in ("json", "both"):
+        write_locked_json_report(out_dir / f"{stem}.json", agg)
+    if args.format in ("md", "both"):
+        write_locked_md_aggregate(out_dir / f"{stem}.md", agg)
+    sys.stderr.write(
+        f"chat-report: wrote {args.format} for aggregate "
+        f"({agg['session_count']} sessions) to {out_dir}\n"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_argparser().parse_args(argv)
 
+    # Strict pairing: when --session-jsonl is given at all, its count must
+    # match the number of positional ids. Avoids silently mispairing when a
+    # caller passes too many paths (e.g., 1 id + 2 paths) or too few.
+    if args.session_jsonl and len(args.session_jsonl) != len(args.ids):
+        sys.stderr.write(
+            f"chat-report: --session-jsonl was given {len(args.session_jsonl)} "
+            f"path(s) but there are {len(args.ids)} positional id(s). Pass one "
+            f"--session-jsonl per id (in the same order), or omit "
+            f"--session-jsonl entirely to resolve via --cwd / CLAUDE_CONFIG_DIR.\n"
+        )
+        return 2
+
     if args.diff:
-        raise NotImplementedError(
-            "Diff mode lands in PR-B3B (feat(claudecode): diff + aggregate "
-            "modes + subagent rollup). The shape is the same; the math is "
-            "shared with the cursor variant."
-        )
+        return _run_diff(args)
     if args.aggregate:
-        raise NotImplementedError(
-            "Aggregate mode lands in PR-B3B. Same as --diff above."
-        )
+        return _run_aggregate(args)
 
     if len(args.ids) != 1:
         sys.stderr.write(
             "chat-report: single-chat mode takes exactly one session UUID. "
             "For multiple sessions use --diff (two) or --aggregate (one or "
-            "more) once those land in PR-B3B.\n"
+            "more).\n"
         )
         return 2
 

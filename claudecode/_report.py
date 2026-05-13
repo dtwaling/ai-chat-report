@@ -34,7 +34,9 @@ from claudecode._classify import classify_tool_class_claudecode
 from claudecode._jsonl import (
     PairedToolCall,
     Turn,
+    collect_tool_uses,
     extract_user_prompt_text,
+    iter_records,
     pair_tool_calls,
     partition_into_turns,
     unknown_record_types,
@@ -410,11 +412,86 @@ def _build_aggregates(
 # ---------------------------------------------------------------------------
 
 
+_LOCKED_CLASSES_ZERO: tuple[str, ...] = (
+    "broad-sweep-read", "broad-sweep-grep", "broad-sweep-glob",
+    "optimus-mcp", "directory-index-read",
+    "edit", "write", "bash", "other",
+)
+
+
+def _zero_by_class() -> dict[str, int]:
+    return {k: 0 for k in _LOCKED_CLASSES_ZERO}
+
+
+def build_subagent_rollup(subagents_dir: Path | None) -> dict[str, Any] | None:
+    """Walk ``<session-uuid>/subagents/`` and return per-subagent tool-call counts.
+
+    Returns ``None`` when no subagents are present (dir absent or empty).
+    When present, returns the ``aggregates.subagent_rollup`` additive shape:
+
+        {
+            "total_subagent_calls": <int>,
+            "subagents": [
+                {
+                    "agent_id": "<id>",
+                    "agent_type": "<type-from-meta-or-empty>",
+                    "description": "<desc-from-meta-or-empty>",
+                    "by_class": {<class>: <count>, ...},
+                },
+                ...
+            ],
+        }
+
+    Per DISCOVERY.md consideration #4 (PM-signed-off 2026-05-12): the
+    primary session's ``aggregates.by_class`` is NOT augmented; subagent
+    tool calls are tracked separately so the success metric reflects
+    main-agent behavior.
+    """
+    if subagents_dir is None or not subagents_dir.is_dir():
+        return None
+    jsonls = sorted(subagents_dir.glob("agent-*.jsonl"))
+    if not jsonls:
+        return None
+
+    subagents: list[dict[str, Any]] = []
+    total = 0
+    for jp in jsonls:
+        agent_id = jp.stem.removeprefix("agent-")
+        by_class = _zero_by_class()
+        for rec in iter_records(jp):
+            for ublock in collect_tool_uses(rec):
+                cls = classify_tool_class_claudecode(
+                    ublock.get("name", ""), ublock.get("input"),
+                )
+                by_class[cls] = by_class.get(cls, 0) + 1
+                total += 1
+        meta_path = subagents_dir / f"agent-{agent_id}.meta.json"
+        agent_type = ""
+        description = ""
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                if isinstance(meta, dict):
+                    agent_type = str(meta.get("agentType", "") or "")
+                    description = str(meta.get("description", "") or "")
+            except (OSError, json.JSONDecodeError):
+                pass
+        subagents.append({
+            "agent_id": agent_id,
+            "agent_type": agent_type,
+            "description": description,
+            "by_class": by_class,
+        })
+
+    return {"total_subagent_calls": total, "subagents": subagents}
+
+
 def build_locked_report(
     records: Iterable[dict[str, Any]],
     *,
     session_id_override: str | None = None,
     ide_version_override: str | None = None,
+    subagents_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Build a locked-shape single-chat report from a record stream.
 
@@ -426,6 +503,11 @@ def build_locked_report(
     sample 297-record session in DISCOVERY.md, ~MB scale for hour-long
     sessions. If single-pass streaming becomes necessary, restructure as
     one combined visitor.
+
+    ``subagents_dir`` -- when provided and non-empty, populates the
+    additive ``aggregates.subagent_rollup`` field (DISCOVERY.md #4).
+    Pass via ``claudecode._paths.subagents_dir_from_jsonl`` from the CLI
+    or via ``subagents_dir`` from the path-resolver helpers.
     """
     records = list(records)
 
@@ -458,6 +540,9 @@ def build_locked_report(
 
     start, end, duration = _session_time_span(records)
     aggregates = _build_aggregates(locked_turns)
+    rollup = build_subagent_rollup(subagents_dir)
+    if rollup is not None:
+        aggregates["subagent_rollup"] = rollup
 
     warnings: list[dict[str, str]] = []
     if spans_upgrade:
@@ -632,5 +717,168 @@ def write_locked_md_report(path: Path, report: dict[str, Any]) -> None:
         for w in report["warnings"]:
             lines.append(f"- **`{w['code']}`** -- {w['message']}")
         lines.append("")
+
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Diff markdown writer
+# ---------------------------------------------------------------------------
+
+
+_TOOL_CLASS_ORDER: tuple[str, ...] = (
+    "broad-sweep-read", "broad-sweep-grep", "broad-sweep-glob",
+    "optimus-mcp", "directory-index-read",
+    "edit", "write", "bash", "other",
+)
+
+
+def write_locked_md_diff(path: Path, diff: dict[str, Any]) -> None:
+    """Write the locked-shape diff report as markdown.
+
+    Layout mirrors ``cursor/chat-report.py::write_locked_md_diff`` for
+    cross-IDE parity but uses the claudecode-local helpers
+    (``_md_pass_glyph`` / ``_md_format_ratio``) for visual consistency
+    within this variant. Diff is a section-4.4 shape; the math itself
+    lives in ``common/_diff_aggregate.py``.
+    """
+    before = diff.get("before", {})
+    after = diff.get("after", {})
+    delta = diff.get("delta", {})
+    bef_aggs = before.get("aggregates", {})
+    aft_aggs = after.get("aggregates", {})
+
+    lines: list[str] = []
+    lines.append(
+        f"# Diff report ({diff.get('ide', '?')}): "
+        f"`{(before.get('session_id') or '?')[:12]}` -> "
+        f"`{(after.get('session_id') or '?')[:12]}`"
+    )
+    lines.append("")
+    lines.append(f"- **IDE version:** `{diff.get('ide_version', '?')}`")
+    lines.append(f"- **Generated:** {diff.get('generated_at_iso', '?')}")
+    lines.append(f"- **Report version:** {diff.get('report_version', '?')}")
+    lines.append("")
+
+    lines.append("## Before vs After -- Summary")
+    lines.append("")
+    lines.append("| | Before | After | Delta |")
+    lines.append("|---|------:|-----:|-----:|")
+    lines.append(
+        f"| **total_tool_calls** | {bef_aggs.get('total_tool_calls', 0)} "
+        f"| {aft_aggs.get('total_tool_calls', 0)} "
+        f"| {delta.get('total_tool_calls', 0):+d} |"
+    )
+    for cls in _TOOL_CLASS_ORDER:
+        bef_v = bef_aggs.get("by_class", {}).get(cls, 0)
+        aft_v = aft_aggs.get("by_class", {}).get(cls, 0)
+        d_v = delta.get("by_class", {}).get(cls, 0)
+        lines.append(f"| `{cls}` | {bef_v} | {aft_v} | {d_v:+d} |")
+    lines.append("")
+
+    lines.append("## Success-metric deltas")
+    lines.append("")
+    da = delta.get("component_a", {})
+    db = delta.get("component_b", {})
+    lines.append(
+        f"- **Component A:** optimus={da.get('optimus_count_delta', 0):+d} / "
+        f"broad-sweep={da.get('broad_sweep_count_delta', 0):+d} -- "
+        f"ratio_delta={_md_format_ratio(da.get('ratio_delta'))} -- "
+        f"pass {_md_pass_glyph(da.get('pass_before'))} -> "
+        f"{_md_pass_glyph(da.get('pass_after'))}"
+    )
+    lines.append(
+        f"- **Component B:** informed={db.get('informed_count_delta', 0):+d} / "
+        f"uninformed={db.get('uninformed_count_delta', 0):+d} -- "
+        f"ratio_delta={_md_format_ratio(db.get('ratio_delta'))} -- "
+        f"pass {_md_pass_glyph(db.get('pass_before'))} -> "
+        f"{_md_pass_glyph(db.get('pass_after'))}"
+    )
+    lines.append("")
+
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Aggregate markdown writer
+# ---------------------------------------------------------------------------
+
+
+def write_locked_md_aggregate(path: Path, agg: dict[str, Any]) -> None:
+    """Write the locked-shape aggregate report as markdown.
+
+    Layout mirrors ``cursor/chat-report.py::write_locked_md_aggregate``
+    for cross-IDE parity. Sections: per-session inventory table, summed
+    by-class block, summed success-metric snapshot.
+    """
+    aggs = agg.get("aggregates", {})
+    smc = aggs.get("success_metric_components", {})
+    a = smc.get("component_a", {})
+    b = smc.get("component_b", {})
+    o = smc.get("overall", {})
+
+    lines: list[str] = []
+    lines.append(
+        f"# Aggregate report ({agg.get('ide', '?')}): "
+        f"{agg.get('session_count', 0)} sessions"
+    )
+    lines.append("")
+    lines.append(f"- **IDE version:** `{agg.get('ide_version', '?')}`")
+    lines.append(f"- **Generated:** {agg.get('generated_at_iso', '?')}")
+    lines.append(f"- **Report version:** {agg.get('report_version', '?')}")
+    lines.append("")
+
+    lines.append("## Per-session inventory")
+    lines.append("")
+    lines.append("| session_id | total_tool_calls | optimus | broad-sweep | denials | errors |")
+    lines.append("|---|---:|---:|---:|---:|---:|")
+    for s in agg.get("sessions", []):
+        s_aggs = s.get("aggregates", {})
+        s_smc = s_aggs.get("success_metric_components", {})
+        bc = s_aggs.get("by_class", {})
+        broad = (
+            bc.get("broad-sweep-read", 0)
+            + bc.get("broad-sweep-grep", 0)
+            + bc.get("broad-sweep-glob", 0)
+        )
+        sid = s.get("session_id", "?") or "?"
+        lines.append(
+            f"| `{sid[:12]}` "
+            f"| {s_aggs.get('total_tool_calls', 0)} "
+            f"| {s_smc.get('component_a', {}).get('optimus_count', 0)} "
+            f"| {broad} "
+            f"| {len(s_aggs.get('denials') or [])} "
+            f"| {len(s_aggs.get('errors') or [])} |"
+        )
+    lines.append("")
+
+    lines.append("## Summed across all sessions -- counts by tool_class")
+    lines.append("")
+    lines.append("| tool_class | count |")
+    lines.append("|------------|------:|")
+    for cls in _TOOL_CLASS_ORDER:
+        lines.append(f"| `{cls}` | {aggs.get('by_class', {}).get(cls, 0)} |")
+    lines.append(f"| **total** | **{aggs.get('total_tool_calls', 0)}** |")
+    lines.append("")
+
+    lines.append("## Summed success-metric snapshot")
+    lines.append("")
+    lines.append(
+        f"- **Component A:** optimus={a.get('optimus_count', 0)} vs "
+        f"broad-sweep={a.get('broad_sweep_count', 0)} "
+        f"(ratio={_md_format_ratio(a.get('ratio'))}) -- "
+        f"**{_md_pass_glyph(a.get('pass'))}**"
+    )
+    lines.append(
+        f"- **Component B:** informed={b.get('informed_count', 0)} vs "
+        f"uninformed={b.get('uninformed_count', 0)} "
+        f"(ratio={_md_format_ratio(b.get('ratio'))}) -- "
+        f"**{_md_pass_glyph(b.get('pass'))}**"
+    )
+    lines.append(
+        f"- **Overall:** **{_md_pass_glyph(o.get('pass'))}**"
+        + (" (partial pass)" if o.get("partial_pass") else "")
+    )
+    lines.append("")
 
     path.write_text("\n".join(lines), encoding="utf-8")

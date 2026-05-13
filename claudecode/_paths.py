@@ -177,3 +177,14 @@ def subagent_meta_path(
     Callers must check ``exists()`` before reading.
     """
     return subagents_dir(session_id, cwd, root) / f"agent-{agent_id}.meta.json"
+
+
+def subagents_dir_from_jsonl(jsonl_path: Path) -> Path:
+    """Subagents dir paired with a main-session JSONL by on-disk convention.
+
+    Layout: ``<dir>/<session-uuid>.jsonl`` <->
+    ``<dir>/<session-uuid>/subagents/``. Use this when the JSONL was
+    located via ``--session-jsonl`` directly rather than through
+    ``CLAUDE_CONFIG_DIR`` / cwd resolution.
+    """
+    return jsonl_path.parent / jsonl_path.stem / "subagents"
