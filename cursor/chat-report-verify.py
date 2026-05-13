@@ -4,7 +4,7 @@
 Two modes:
 
 * ``--validate <path.json>`` -- offline JSON validation against the locked
-  structured-report shape (``cursor/_locked_contract.py``). Auto-detects
+  structured-report shape (``common/_locked_contract.py``). Auto-detects
   single-chat / diff / aggregate via the ``report_kind`` field. Returns 0
   on conform, non-zero on violation. No Cursor state DB needed.
 
@@ -31,7 +31,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from cursor import _locked_contract as contract  # noqa: E402
+from common import _locked_contract as contract  # noqa: E402
 
 SCRIPT = Path(__file__).resolve().parent / "chat-report.py"
 CONFIG = Path(__file__).resolve().parent / "chat-report-verify.config.json"

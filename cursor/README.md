@@ -175,7 +175,7 @@ Consumers reading these JSON files must do one of:
 - Pre-process with `allow_nan=True` aware parsers (e.g., `simplejson` with
   `allow_nan=True`, or post-replace the literals before strict-JSON parsing).
 
-The `assert_locked_*_conforms` validators in `cursor/_locked_contract.py`
+The `assert_locked_*_conforms` validators in `common/_locked_contract.py`
 treat `float` as the type for `ratio` and tolerate any IEEE-754 value.
 
 ---
@@ -197,4 +197,4 @@ project. Migrate to the default locked shape at your earliest opportunity.
 | `chat-report.py` | Main emitter. CLI + library. |
 | `chat-report-verify.py` | Verification harness. `--validate <path>` for offline JSON checks; default mode runs the full integration suite against the local Cursor state DB (requires `chat-report-verify.config.json`). |
 | `chat-report-verify.config.template.json` | Template for the per-machine integration-mode config. Copy to `chat-report-verify.config.json` and fill in your IDs. |
-| `_locked_contract.py` | Programmatic validator for the locked-shape contract. Imported by both the verify script and the test suite. |
+| (validator moved) | The locked-shape contract validator lives in `common/_locked_contract.py` -- it is IDE-agnostic and shared with the Claude Code variant. |

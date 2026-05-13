@@ -49,6 +49,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+# Make the cross-IDE ``common`` package importable when this script is run
+# directly via ``python cursor/chat-report.py`` from the repo root. The
+# test harness (tests/cursor/conftest.py) prepends repo root to sys.path
+# already; this guards the direct-CLI path.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from common._locked_helpers import (  # noqa: E402
+    classify_informed_precision_read,
+    compute_success_metric_components,
+    normalize_session_id,
+)
+
 
 # ---------------------------------------------------------------------------
 # Paths and config
@@ -1894,14 +1908,6 @@ _LOCKED_TOOL_CLASSES: tuple[str, ...] = (
 )
 
 
-def normalize_session_id(session_id: str) -> str:
-    """Canonical session-ID form: lowercase, non-alphanumerics stripped.
-
-    Enables cross-IDE aggregation by content rather than IDE-specific format.
-    """
-    return re.sub(r"[^a-z0-9]", "", (session_id or "").lower())
-
-
 def _params_target_path(params: Any) -> str:
     """Best-effort extraction of the file path from a tool-call params dict."""
     if not isinstance(params, dict):
@@ -1935,101 +1941,6 @@ def classify_tool_class_cursor(tool_name: str, params: Any) -> str:
     if name in _KNOWN_OPTIMUS_TOOLS or name.startswith("optimus_"):
         return "optimus-mcp"
     return "other"
-
-
-def classify_informed_precision_read(
-    tool_call: dict[str, Any],
-    prior_in_turn: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    """Classify a tool_call against the informed-precision-read heuristic.
-
-    ``tool_call`` is a locked-shape tool_call dict (or any dict with
-    ``tool_class`` set). ``prior_in_turn`` is the list of locked-shape tool_call
-    dicts that preceded this one within the same agent turn.
-
-    A Read is "informed" if it follows a DIRECTORY_INDEX.md read in the same
-    turn; otherwise "uninformed". Non-Read tool calls (and the dir-index read
-    itself) are classified as not-applicable.
-    """
-    tool_class = tool_call.get("tool_class")
-    if tool_class != "broad-sweep-read":
-        return {
-            "applicable": False,
-            "classification": "n/a",
-            "reason": f"tool_class={tool_class!r} is not a broad-sweep Read",
-        }
-    prior = prior_in_turn or []
-    saw_dir_index = any(p.get("tool_class") == "directory-index-read" for p in prior)
-    if saw_dir_index:
-        return {
-            "applicable": True,
-            "classification": "informed",
-            "reason": "preceded by a DIRECTORY_INDEX.md read in the same turn",
-        }
-    return {
-        "applicable": True,
-        "classification": "uninformed",
-        "reason": "no DIRECTORY_INDEX.md read preceded this Read in the same turn",
-    }
-
-
-def compute_success_metric_components(
-    by_class: dict[str, int],
-    informed_count: int,
-    uninformed_count: int,
-) -> dict[str, Any]:
-    """Compute Components A and B per ``docs/decisions/success-metric.md``.
-
-    Component A: optimus-mcp count >= 1.0x (broad-sweep-read + grep + glob) count.
-    Component B: informed-precision-read count >= 1.0x uninformed-read count.
-    Overall: A AND B. partial_pass: A XOR B.
-
-    Edge cases:
-    - Zero denominator with zero numerator => ratio 1.0, pass=True (trivial).
-    - Zero denominator with positive numerator => ratio inf, pass=True.
-    """
-    optimus = int(by_class.get("optimus-mcp", 0))
-    broad_sweep = sum(int(by_class.get(k, 0)) for k in (
-        "broad-sweep-read", "broad-sweep-grep", "broad-sweep-glob",
-    ))
-    if broad_sweep == 0:
-        ratio_a = 1.0 if optimus == 0 else float("inf")
-    else:
-        ratio_a = optimus / broad_sweep
-    pass_a = optimus >= broad_sweep
-
-    informed = int(informed_count)
-    uninformed = int(uninformed_count)
-    if uninformed == 0:
-        ratio_b = 1.0 if informed == 0 else float("inf")
-    else:
-        ratio_b = informed / uninformed
-    pass_b = informed >= uninformed
-
-    overall_pass = pass_a and pass_b
-    partial_pass = (pass_a or pass_b) and not overall_pass
-
-    return {
-        "component_a": {
-            "definition": "optimus_* count >= 1.0x broad-sweep (read+grep+glob) count",
-            "optimus_count": optimus,
-            "broad_sweep_count": broad_sweep,
-            "ratio": ratio_a,
-            "pass": pass_a,
-        },
-        "component_b": {
-            "definition": "informed-precision-read count >= 1.0x uninformed-read count",
-            "informed_count": informed,
-            "uninformed_count": uninformed,
-            "ratio": ratio_b,
-            "pass": pass_b,
-            "heuristic_failure_modes_flagged": [],
-        },
-        "overall": {
-            "pass": overall_pass,
-            "partial_pass": partial_pass,
-        },
-    }
 
 
 def _group_rows_into_turns(rows: list[BubbleRow]) -> list[list[BubbleRow]]:
