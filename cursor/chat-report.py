@@ -1800,6 +1800,796 @@ def build_report(chat_id: str, state_con: sqlite3.Connection, track_con: sqlite3
     return report
 
 
+# ---------------------------------------------------------------------------
+# Locked structured-report shape (MISSION-BRIEF section 4.1)
+# ---------------------------------------------------------------------------
+#
+# The locked shape is the integration contract that spike-1 telemetry,
+# success-metric evaluation (Components A and B), and M1.5 integration depend
+# on. Both Cursor and Claude Code variants emit the same shape; this module
+# implements the Cursor side. See MISSION-BRIEF.md section 4 for the canonical
+# schema.
+
+LOCKED_REPORT_VERSION = "1.0"
+
+# Tool-name → locked tool_class enum (Cursor's vocabulary).
+# directory-index-read is recovered by inspecting `params` for the DIRECTORY_INDEX.md
+# path -- this lookup table covers the plain mappings.
+_CURSOR_TOOL_CLASS_MAP: dict[str, str] = {
+    "read_file_v2": "broad-sweep-read",
+    "ripgrep_raw_search": "broad-sweep-grep",
+    "glob_file_search": "broad-sweep-glob",
+    "run_terminal_command_v2": "bash",
+    "edit_file_v2": "edit",
+}
+
+_LOCKED_TOOL_CLASSES: tuple[str, ...] = (
+    "broad-sweep-read", "broad-sweep-grep", "broad-sweep-glob",
+    "optimus-mcp", "directory-index-read",
+    "edit", "write", "bash", "other",
+)
+
+
+def normalize_session_id(session_id: str) -> str:
+    """Canonical session-ID form: lowercase, non-alphanumerics stripped.
+
+    Enables cross-IDE aggregation by content rather than IDE-specific format.
+    """
+    return re.sub(r"[^a-z0-9]", "", (session_id or "").lower())
+
+
+def _params_target_path(params: Any) -> str:
+    """Best-effort extraction of the file path from a tool-call params dict."""
+    if not isinstance(params, dict):
+        return ""
+    for key in ("targetFile", "file_path", "path", "uri", "effectiveUri"):
+        v = params.get(key)
+        if isinstance(v, str) and v:
+            return v
+    return ""
+
+
+def classify_tool_class_cursor(tool_name: str, params: Any) -> str:
+    """Map a Cursor tool-call to the locked tool_class enum.
+
+    DIRECTORY_INDEX.md reads are recovered from the params payload; optimus_*
+    MCP tools (post-``normalize_tool_name``) all collapse to ``optimus-mcp``.
+    """
+    name = (tool_name or "").strip()
+    if not name:
+        return "other"
+    base = _CURSOR_TOOL_CLASS_MAP.get(name)
+    if base == "broad-sweep-read":
+        path = _params_target_path(params)
+        if path and path.replace("\\", "/").endswith("DIRECTORY_INDEX.md"):
+            return "directory-index-read"
+        return "broad-sweep-read"
+    if base is not None:
+        return base
+    # optimus_* MCP names land here (already stripped of server prefix by
+    # ``normalize_tool_name`` upstream).
+    if name in _KNOWN_OPTIMUS_TOOLS or name.startswith("optimus_"):
+        return "optimus-mcp"
+    return "other"
+
+
+def classify_informed_precision_read(
+    tool_call: dict[str, Any],
+    prior_in_turn: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Classify a tool_call against the informed-precision-read heuristic.
+
+    ``tool_call`` is a locked-shape tool_call dict (or any dict with
+    ``tool_class`` set). ``prior_in_turn`` is the list of locked-shape tool_call
+    dicts that preceded this one within the same agent turn.
+
+    A Read is "informed" if it follows a DIRECTORY_INDEX.md read in the same
+    turn; otherwise "uninformed". Non-Read tool calls (and the dir-index read
+    itself) are classified as not-applicable.
+    """
+    tool_class = tool_call.get("tool_class")
+    if tool_class != "broad-sweep-read":
+        return {
+            "applicable": False,
+            "classification": "n/a",
+            "reason": f"tool_class={tool_class!r} is not a broad-sweep Read",
+        }
+    prior = prior_in_turn or []
+    saw_dir_index = any(p.get("tool_class") == "directory-index-read" for p in prior)
+    if saw_dir_index:
+        return {
+            "applicable": True,
+            "classification": "informed",
+            "reason": "preceded by a DIRECTORY_INDEX.md read in the same turn",
+        }
+    return {
+        "applicable": True,
+        "classification": "uninformed",
+        "reason": "no DIRECTORY_INDEX.md read preceded this Read in the same turn",
+    }
+
+
+def compute_success_metric_components(
+    by_class: dict[str, int],
+    informed_count: int,
+    uninformed_count: int,
+) -> dict[str, Any]:
+    """Compute Components A and B per ``docs/decisions/success-metric.md``.
+
+    Component A: optimus-mcp count >= 1.0x (broad-sweep-read + grep + glob) count.
+    Component B: informed-precision-read count >= 1.0x uninformed-read count.
+    Overall: A AND B. partial_pass: A XOR B.
+
+    Edge cases:
+    - Zero denominator with zero numerator => ratio 1.0, pass=True (trivial).
+    - Zero denominator with positive numerator => ratio inf, pass=True.
+    """
+    optimus = int(by_class.get("optimus-mcp", 0))
+    broad_sweep = sum(int(by_class.get(k, 0)) for k in (
+        "broad-sweep-read", "broad-sweep-grep", "broad-sweep-glob",
+    ))
+    if broad_sweep == 0:
+        ratio_a = 1.0 if optimus == 0 else float("inf")
+    else:
+        ratio_a = optimus / broad_sweep
+    pass_a = optimus >= broad_sweep
+
+    informed = int(informed_count)
+    uninformed = int(uninformed_count)
+    if uninformed == 0:
+        ratio_b = 1.0 if informed == 0 else float("inf")
+    else:
+        ratio_b = informed / uninformed
+    pass_b = informed >= uninformed
+
+    overall_pass = pass_a and pass_b
+    partial_pass = (pass_a or pass_b) and not overall_pass
+
+    return {
+        "component_a": {
+            "definition": "optimus_* count >= 1.0x broad-sweep (read+grep+glob) count",
+            "optimus_count": optimus,
+            "broad_sweep_count": broad_sweep,
+            "ratio": ratio_a,
+            "pass": pass_a,
+        },
+        "component_b": {
+            "definition": "informed-precision-read count >= 1.0x uninformed-read count",
+            "informed_count": informed,
+            "uninformed_count": uninformed,
+            "ratio": ratio_b,
+            "pass": pass_b,
+            "heuristic_failure_modes_flagged": [],
+        },
+        "overall": {
+            "pass": overall_pass,
+            "partial_pass": partial_pass,
+        },
+    }
+
+
+def _group_rows_into_turns(rows: list[BubbleRow]) -> list[list[BubbleRow]]:
+    """Group consecutive same-role bubbles into agent turns.
+
+    A turn boundary is where the role flips (user -> assistant or vice versa).
+    Bubbles with unknown role (type == -1) attach to the preceding turn, or
+    start their own turn if there is none yet.
+    """
+    turns: list[list[BubbleRow]] = []
+    current_role: int | None = None
+    for r in rows:
+        if current_role is None or (r.type in (1, 2) and r.type != current_role):
+            turns.append([])
+            current_role = r.type if r.type in (1, 2) else current_role
+        turns[-1].append(r)
+    return turns
+
+
+def _denial_reason_from_preview(preview_text: str) -> str | None:
+    """Pull a deterministic denial reason from a result preview string."""
+    if not preview_text:
+        return None
+    return preview_text.strip()[:200] or None
+
+
+def _build_locked_tool_call(
+    call_index: int,
+    raw_payload: dict[str, Any],
+    extracted: dict[str, Any],
+) -> dict[str, Any]:
+    """Convert a single extracted tool call into the locked tool_call shape.
+
+    ``extracted`` is the dict returned by :func:`extract_tool_call`; ``raw_payload``
+    is the underlying bubble payload (used for ``input_payload`` recovery).
+    """
+    params = extracted.get("params")
+    tool_name = extracted.get("name") or ""
+    tool_class = classify_tool_class_cursor(tool_name, params)
+
+    is_denial = bool(extracted.get("isDenial"))
+    is_error = bool(extracted.get("isError"))
+    status = extracted.get("status")
+    if is_denial:
+        output_status = "denied"
+    elif is_error:
+        output_status = "error"
+    elif status in (None, "completed"):
+        output_status = "ok"
+    else:
+        output_status = "error"
+
+    result_preview = extracted.get("resultPreview") or ""
+    return {
+        "call_index": call_index,
+        "tool_name": tool_name,
+        "tool_class": tool_class,
+        "input_summary": preview(params, 180),
+        "input_payload": params if params is not None else {},
+        "output_summary": result_preview,
+        "output_status": output_status,
+        "denial_reason": _denial_reason_from_preview(result_preview) if is_denial else None,
+        "elapsed_ms": None,  # Cursor does not capture per-call duration
+        "informed_precision_read": {
+            "applicable": False,
+            "classification": "n/a",
+            "reason": "filled in after turn-walk",
+        },
+    }
+
+
+def build_locked_report(
+    chat_id: str,
+    meta: dict[str, Any],
+    rows: list[BubbleRow],
+    ordered_raw: list[tuple[int, str, dict[str, Any]]],
+    *,
+    input_id: str | None = None,
+    resolved_from: str | None = None,
+    ide_version: str = "unknown",
+    filter_category: str = "all",
+) -> dict[str, Any]:
+    """Build a MISSION-BRIEF section-4-conformant locked report from a Cursor chat.
+
+    Parameters mirror :func:`build_report` plus an ``ide_version`` hint. The
+    output dict is downstream-ready for spike-1 telemetry, success-metric
+    evaluation, and M1.5 integration -- no IDE-specific branching needed.
+    """
+    raw_by_id = {bid: payload for _, bid, payload in ordered_raw}
+
+    start_ms = meta.get("createdAt")
+    end_ms = meta.get("lastUpdatedAt")
+    start_iso = epoch_ms_to_iso(start_ms) if isinstance(start_ms, (int, float)) else None
+    end_iso = epoch_ms_to_iso(end_ms) if isinstance(end_ms, (int, float)) else None
+    if isinstance(start_ms, (int, float)) and isinstance(end_ms, (int, float)) and end_ms >= start_ms:
+        duration_s = int((end_ms - start_ms) // 1000)
+    else:
+        duration_s = 0
+
+    turns_data: list[dict[str, Any]] = []
+    by_class: dict[str, int] = {k: 0 for k in _LOCKED_TOOL_CLASSES}
+    informed_count = 0
+    uninformed_count = 0
+    denials: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    global_call_counter = 0
+
+    for turn_index, group in enumerate(_group_rows_into_turns(rows)):
+        role = "user" if group and group[0].type == 1 else "assistant"
+        prior_in_turn: list[dict[str, Any]] = []
+        tool_calls: list[dict[str, Any]] = []
+        for row in group:
+            if not row.toolCall:
+                continue
+            if not _category_included(row.toolCall["category"], filter_category):
+                continue
+            raw_payload = raw_by_id.get(row.bubbleId, {})
+            tc = _build_locked_tool_call(global_call_counter, raw_payload, row.toolCall)
+            global_call_counter += 1
+            # Now that tool_class is known for this call AND all prior calls in
+            # the turn, classify the informed-precision-read signal.
+            tc["informed_precision_read"] = classify_informed_precision_read(tc, prior_in_turn)
+            ipr = tc["informed_precision_read"]
+            if ipr["applicable"]:
+                if ipr["classification"] == "informed":
+                    informed_count += 1
+                elif ipr["classification"] == "uninformed":
+                    uninformed_count += 1
+            by_class[tc["tool_class"]] = by_class.get(tc["tool_class"], 0) + 1
+            if tc["output_status"] == "denied":
+                denials.append({
+                    "tool_name": tc["tool_name"],
+                    "denial_reason": tc["denial_reason"] or "",
+                    "turn_index": turn_index,
+                    "call_index": tc["call_index"],
+                })
+            elif tc["output_status"] == "error":
+                errors.append({
+                    "tool_name": tc["tool_name"],
+                    "error_excerpt": (tc["output_summary"] or "")[:200],
+                    "turn_index": turn_index,
+                    "call_index": tc["call_index"],
+                })
+            prior_in_turn.append(tc)
+            tool_calls.append(tc)
+
+        turns_data.append({
+            "turn_index": turn_index,
+            "role": role,
+            "started_iso": start_iso or "",
+            "ended_iso": end_iso or "",
+            "tool_calls": tool_calls,
+        })
+
+    warnings.append({
+        "code": "cursor-per-turn-timestamps-synthesized",
+        "message": (
+            "Cursor's bubble store does not expose per-bubble timestamps; "
+            "all turns share the session start/end ISO bounds."
+        ),
+    })
+
+    success_metrics = compute_success_metric_components(
+        by_class, informed_count, uninformed_count,
+    )
+
+    out: dict[str, Any] = {
+        "report_version": LOCKED_REPORT_VERSION,
+        "report_kind": "single-chat",
+        "ide": "cursor",
+        "ide_version": ide_version,
+        "session_id": chat_id,
+        "session_id_normalized": normalize_session_id(chat_id),
+        "session_start_iso": start_iso or "",
+        "session_end_iso": end_iso or "",
+        "session_duration_s": duration_s,
+        "turns": turns_data,
+        "aggregates": {
+            "total_tool_calls": sum(by_class.values()),
+            "by_class": by_class,
+            "success_metric_components": success_metrics,
+            "denials": denials,
+            "errors": errors,
+        },
+        "warnings": warnings,
+    }
+    if input_id and input_id != chat_id:
+        out["resolved_from"] = {
+            "input_id": input_id,
+            "source": resolved_from or "",
+        }
+    return out
+
+
+def build_locked_aggregate_report(reports: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build a section-4.3-conformant aggregate from N locked single-chat reports.
+
+    Sums ``aggregates.by_class`` and ``total_tool_calls`` across all input
+    sessions, recomputes ``success_metric_components`` against the summed
+    counts, flattens denials and errors with their originating ``session_id``,
+    and embeds per-session snippets so consumers can drill into specifics.
+    """
+    by_class: dict[str, int] = {k: 0 for k in _LOCKED_TOOL_CLASSES}
+    informed_total = 0
+    uninformed_total = 0
+    denials: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    sessions: list[dict[str, Any]] = []
+    total_tool_calls = 0
+    ide = "cursor"
+
+    for rpt in reports:
+        ide = rpt.get("ide", ide)
+        aggs = rpt.get("aggregates", {})
+        total_tool_calls += int(aggs.get("total_tool_calls", 0))
+        for k, v in aggs.get("by_class", {}).items():
+            by_class[k] = by_class.get(k, 0) + int(v)
+        smc_b = aggs.get("success_metric_components", {}).get("component_b", {})
+        informed_total += int(smc_b.get("informed_count", 0))
+        uninformed_total += int(smc_b.get("uninformed_count", 0))
+        sess_id = rpt.get("session_id", "")
+        for d in aggs.get("denials", []) or []:
+            d2 = dict(d)
+            d2["session_id"] = sess_id
+            denials.append(d2)
+        for e in aggs.get("errors", []) or []:
+            e2 = dict(e)
+            e2["session_id"] = sess_id
+            errors.append(e2)
+        sessions.append({
+            "session_id": sess_id,
+            "session_id_normalized": rpt.get("session_id_normalized", ""),
+            "aggregates": aggs,
+        })
+
+    success_metrics = compute_success_metric_components(
+        by_class, informed_total, uninformed_total,
+    )
+
+    # ide_version: unique value if all sessions agree, else "mixed", else "unknown".
+    versions = {r.get("ide_version", "") for r in reports if r.get("ide_version")}
+    if len(versions) == 1:
+        ide_version = next(iter(versions))
+    elif len(versions) > 1:
+        ide_version = "mixed"
+    else:
+        ide_version = "unknown"
+
+    return {
+        "report_version": LOCKED_REPORT_VERSION,
+        "report_kind": "aggregate",
+        "ide": ide,
+        "ide_version": ide_version,
+        "generated_at_iso": datetime.now(timezone.utc).isoformat(),
+        "session_count": len(reports),
+        "sessions": sessions,
+        "aggregates": {
+            "total_tool_calls": total_tool_calls,
+            "by_class": by_class,
+            "success_metric_components": success_metrics,
+            "denials": denials,
+            "errors": errors,
+        },
+    }
+
+
+def _format_ratio(r: Any) -> str:
+    """Render a ratio for markdown display. ``inf`` -> ``∞`` so the locked
+    contract's infinite-ratio sentinel is unambiguous in human-facing output."""
+    import math as _math
+    if not isinstance(r, (int, float)):
+        return str(r)
+    if _math.isinf(r):
+        return "∞" if r > 0 else "-∞"
+    return f"{r:.3f}"
+
+
+def _md_pass(b: Any) -> str:
+    return "PASS" if b else "FAIL"
+
+
+def write_locked_md_report(path: Path, report: dict[str, Any]) -> None:
+    """Render a locked single-chat report as markdown per MISSION-BRIEF section 4.2."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    aggs = report.get("aggregates", {})
+    smc = aggs.get("success_metric_components", {})
+    a = smc.get("component_a", {})
+    b = smc.get("component_b", {})
+    overall = smc.get("overall", {})
+
+    lines: list[str] = []
+    lines.append(f"# Chat report -- `{report.get('session_id', '?')}` (cursor)")
+    lines.append("")
+    lines.append(f"- **Session ID:** `{report.get('session_id', '?')}`")
+    lines.append(f"- **Normalized:** `{report.get('session_id_normalized', '')}`")
+    lines.append(f"- **IDE:** {report.get('ide', '?')} ({report.get('ide_version', '?')})")
+    lines.append(f"- **Session start:** {report.get('session_start_iso') or '—'}")
+    lines.append(f"- **Session end:** {report.get('session_end_iso') or '—'}")
+    lines.append(f"- **Duration:** {report.get('session_duration_s', 0)} s")
+    lines.append(f"- **Report version:** {report.get('report_version', '?')}")
+    lines.append(f"- **Report kind:** {report.get('report_kind', '?')}")
+    lines.append("")
+
+    lines.append("## Summary -- counts by tool_class")
+    lines.append("")
+    lines.append("| tool_class | count |")
+    lines.append("|---|---:|")
+    for cls in _LOCKED_TOOL_CLASSES:
+        lines.append(f"| `{cls}` | {aggs.get('by_class', {}).get(cls, 0)} |")
+    lines.append(f"| **total_tool_calls** | **{aggs.get('total_tool_calls', 0)}** |")
+    lines.append("")
+
+    lines.append("## Success-metric snapshot")
+    lines.append("")
+    lines.append("| component | counts | ratio | result |")
+    lines.append("|---|---|---:|---|")
+    lines.append(
+        f"| **Component A** (optimus / broad-sweep) "
+        f"| {a.get('optimus_count', 0)} / {a.get('broad_sweep_count', 0)} "
+        f"| {_format_ratio(a.get('ratio'))} | {_md_pass(a.get('pass'))} |"
+    )
+    lines.append(
+        f"| **Component B** (informed / uninformed reads) "
+        f"| {b.get('informed_count', 0)} / {b.get('uninformed_count', 0)} "
+        f"| {_format_ratio(b.get('ratio'))} | {_md_pass(b.get('pass'))} |"
+    )
+    overall_label = _md_pass(overall.get("pass"))
+    if overall.get("partial_pass"):
+        overall_label += " (partial)"
+    lines.append(f"| **Overall** | -- | -- | {overall_label} |")
+    lines.append("")
+
+    lines.append("## Turn-by-turn trajectory")
+    lines.append("")
+    for turn in report.get("turns", []):
+        lines.append(f"### Turn {turn.get('turn_index', '?')} -- {turn.get('role', '?')}")
+        if turn.get("started_iso") or turn.get("ended_iso"):
+            lines.append(
+                f"_{turn.get('started_iso', '—')} → {turn.get('ended_iso', '—')}_"
+            )
+        lines.append("")
+        tcs = turn.get("tool_calls") or []
+        if not tcs:
+            lines.append("_(no tool calls)_")
+            lines.append("")
+            continue
+        lines.append("| # | tool | class | status | informed | input |")
+        lines.append("|---:|---|---|---|---|---|")
+        for tc in tcs:
+            ipr = tc.get("informed_precision_read", {}) or {}
+            cls_label = ipr.get("classification", "n/a")
+            lines.append(
+                f"| {tc.get('call_index', '?')} "
+                f"| `{tc.get('tool_name', '?')}` "
+                f"| {tc.get('tool_class', '?')} "
+                f"| {tc.get('output_status', '?')} "
+                f"| {cls_label} "
+                f"| `{(tc.get('input_summary') or '')[:120].replace('|', '\\|')}` |"
+            )
+        lines.append("")
+
+    lines.append("## Denials")
+    lines.append("")
+    denials = aggs.get("denials") or []
+    if not denials:
+        lines.append("_None._")
+        lines.append("")
+    else:
+        lines.append("| turn | call | tool | reason |")
+        lines.append("|---:|---:|---|---|")
+        for d in denials:
+            reason = (d.get("denial_reason") or "").replace("|", "\\|")[:120]
+            lines.append(
+                f"| {d.get('turn_index', '?')} | {d.get('call_index', '?')} "
+                f"| `{d.get('tool_name', '?')}` | {reason} |"
+            )
+        lines.append("")
+
+    lines.append("## Errors")
+    lines.append("")
+    errors = aggs.get("errors") or []
+    if not errors:
+        lines.append("_None._")
+        lines.append("")
+    else:
+        lines.append("| turn | call | tool | excerpt |")
+        lines.append("|---:|---:|---|---|")
+        for e in errors:
+            excerpt = (e.get("error_excerpt") or "").replace("|", "\\|")[:120]
+            lines.append(
+                f"| {e.get('turn_index', '?')} | {e.get('call_index', '?')} "
+                f"| `{e.get('tool_name', '?')}` | {excerpt} |"
+            )
+        lines.append("")
+
+    lines.append("## Warnings")
+    lines.append("")
+    warnings = report.get("warnings") or []
+    if not warnings:
+        lines.append("_None._")
+        lines.append("")
+    else:
+        for w in warnings:
+            lines.append(f"- **{w.get('code', '?')}:** {w.get('message', '')}")
+        lines.append("")
+
+    with path.open("w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+
+def _md_render_locked_summary_block(lines: list[str], aggs: dict[str, Any], heading: str) -> None:
+    """Append a 'counts by tool_class' block + success-metric snapshot for an
+    aggregates dict (used by both single-chat and aggregate markdown)."""
+    lines.append(f"## {heading} -- counts by tool_class")
+    lines.append("")
+    lines.append("| tool_class | count |")
+    lines.append("|---|---:|")
+    for cls in _LOCKED_TOOL_CLASSES:
+        lines.append(f"| `{cls}` | {aggs.get('by_class', {}).get(cls, 0)} |")
+    lines.append(f"| **total_tool_calls** | **{aggs.get('total_tool_calls', 0)}** |")
+    lines.append("")
+
+
+def write_locked_md_diff(path: Path, diff: dict[str, Any]) -> None:
+    """Render a locked diff report as markdown."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    before = diff.get("before", {})
+    after = diff.get("after", {})
+    delta = diff.get("delta", {})
+    bef_aggs = before.get("aggregates", {})
+    aft_aggs = after.get("aggregates", {})
+
+    lines: list[str] = []
+    lines.append(
+        f"# Diff report -- `{before.get('session_id', '?')[:12]}…` → "
+        f"`{after.get('session_id', '?')[:12]}…`"
+    )
+    lines.append("")
+    lines.append(f"- **IDE:** {diff.get('ide', '?')}")
+    lines.append(f"- **Generated:** {diff.get('generated_at_iso', '?')}")
+    lines.append(f"- **Report version:** {diff.get('report_version', '?')}")
+    lines.append("")
+
+    lines.append("## Before vs After -- summary")
+    lines.append("")
+    lines.append("| | Before | After | Delta |")
+    lines.append("|---|---:|---:|---:|")
+    lines.append(
+        f"| **total_tool_calls** | {bef_aggs.get('total_tool_calls', 0)} "
+        f"| {aft_aggs.get('total_tool_calls', 0)} "
+        f"| {delta.get('total_tool_calls', 0):+d} |"
+    )
+    for cls in _LOCKED_TOOL_CLASSES:
+        bef_v = bef_aggs.get("by_class", {}).get(cls, 0)
+        aft_v = aft_aggs.get("by_class", {}).get(cls, 0)
+        d_v = delta.get("by_class", {}).get(cls, 0)
+        lines.append(f"| `{cls}` | {bef_v} | {aft_v} | {d_v:+d} |")
+    lines.append("")
+
+    lines.append("## Success-metric deltas")
+    lines.append("")
+    da = delta.get("component_a", {})
+    db = delta.get("component_b", {})
+    lines.append("| component | optimus / informed | broad-sweep / uninformed | ratio delta | pass: before → after |")
+    lines.append("|---|---:|---:|---:|---|")
+    lines.append(
+        f"| **Component A** | {da.get('optimus_count_delta', 0):+d} "
+        f"| {da.get('broad_sweep_count_delta', 0):+d} "
+        f"| {_format_ratio(da.get('ratio_delta'))} "
+        f"| {_md_pass(da.get('pass_before'))} → {_md_pass(da.get('pass_after'))} |"
+    )
+    lines.append(
+        f"| **Component B** | {db.get('informed_count_delta', 0):+d} "
+        f"| {db.get('uninformed_count_delta', 0):+d} "
+        f"| {_format_ratio(db.get('ratio_delta'))} "
+        f"| {_md_pass(db.get('pass_before'))} → {_md_pass(db.get('pass_after'))} |"
+    )
+    lines.append("")
+
+    with path.open("w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+
+def write_locked_md_aggregate(path: Path, agg: dict[str, Any]) -> None:
+    """Render a locked aggregate report as markdown."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    aggs = agg.get("aggregates", {})
+    smc = aggs.get("success_metric_components", {})
+    a = smc.get("component_a", {})
+    b = smc.get("component_b", {})
+    overall = smc.get("overall", {})
+
+    lines: list[str] = []
+    lines.append(f"# Aggregate report -- {agg.get('session_count', 0)} sessions")
+    lines.append("")
+    lines.append(f"- **IDE:** {agg.get('ide', '?')}")
+    lines.append(f"- **Generated:** {agg.get('generated_at_iso', '?')}")
+    lines.append(f"- **Report version:** {agg.get('report_version', '?')}")
+    lines.append("")
+
+    lines.append("## Per-session inventory")
+    lines.append("")
+    lines.append("| session_id | total_tool_calls | optimus | broad-sweep | denials | errors |")
+    lines.append("|---|---:|---:|---:|---:|---:|")
+    for s in agg.get("sessions", []):
+        s_aggs = s.get("aggregates", {})
+        s_smc = s_aggs.get("success_metric_components", {})
+        bc = s_aggs.get("by_class", {})
+        broad = bc.get("broad-sweep-read", 0) + bc.get("broad-sweep-grep", 0) + bc.get("broad-sweep-glob", 0)
+        lines.append(
+            f"| `{s.get('session_id', '?')[:12]}…` "
+            f"| {s_aggs.get('total_tool_calls', 0)} "
+            f"| {s_smc.get('component_a', {}).get('optimus_count', 0)} "
+            f"| {broad} "
+            f"| {len(s_aggs.get('denials') or [])} "
+            f"| {len(s_aggs.get('errors') or [])} |"
+        )
+    lines.append("")
+
+    _md_render_locked_summary_block(lines, aggs, "Summed across all sessions")
+
+    lines.append("## Summed success-metric snapshot")
+    lines.append("")
+    lines.append("| component | counts | ratio | result |")
+    lines.append("|---|---|---:|---|")
+    lines.append(
+        f"| **Component A** | {a.get('optimus_count', 0)} / {a.get('broad_sweep_count', 0)} "
+        f"| {_format_ratio(a.get('ratio'))} | {_md_pass(a.get('pass'))} |"
+    )
+    lines.append(
+        f"| **Component B** | {b.get('informed_count', 0)} / {b.get('uninformed_count', 0)} "
+        f"| {_format_ratio(b.get('ratio'))} | {_md_pass(b.get('pass'))} |"
+    )
+    overall_label = _md_pass(overall.get("pass"))
+    if overall.get("partial_pass"):
+        overall_label += " (partial)"
+    lines.append(f"| **Overall** | -- | -- | {overall_label} |")
+    lines.append("")
+
+    with path.open("w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+
+def _safe_ratio_delta(before: float, after: float) -> float:
+    """Compute ``after - before`` for ratios that may be inf.
+
+    ``inf - inf`` -> 0 (no change); finite cases pass through. Always
+    ``allow_nan=True``-serializable.
+    """
+    import math as _math
+    if _math.isinf(before) and _math.isinf(after):
+        return 0.0
+    return after - before
+
+
+def build_locked_diff_report(
+    before: dict[str, Any],
+    after: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a section-4.4-conformant diff report from two locked single-chat reports.
+
+    ``before`` and ``after`` are the dicts returned by :func:`build_locked_report`.
+    The diff is ``after - before`` per aggregate counter and per Component A/B
+    ratio. Same versioning as the single-chat shape.
+    """
+    bef_aggs = before.get("aggregates", {})
+    aft_aggs = after.get("aggregates", {})
+    bef_by_class = bef_aggs.get("by_class", {})
+    aft_by_class = aft_aggs.get("by_class", {})
+    by_class_delta = {
+        k: int(aft_by_class.get(k, 0)) - int(bef_by_class.get(k, 0))
+        for k in _LOCKED_TOOL_CLASSES
+    }
+
+    bef_a = bef_aggs.get("success_metric_components", {}).get("component_a", {})
+    aft_a = aft_aggs.get("success_metric_components", {}).get("component_a", {})
+    bef_b = bef_aggs.get("success_metric_components", {}).get("component_b", {})
+    aft_b = aft_aggs.get("success_metric_components", {}).get("component_b", {})
+
+    delta = {
+        "total_tool_calls": int(aft_aggs.get("total_tool_calls", 0))
+                          - int(bef_aggs.get("total_tool_calls", 0)),
+        "by_class": by_class_delta,
+        "component_a": {
+            "optimus_count_delta":
+                int(aft_a.get("optimus_count", 0)) - int(bef_a.get("optimus_count", 0)),
+            "broad_sweep_count_delta":
+                int(aft_a.get("broad_sweep_count", 0)) - int(bef_a.get("broad_sweep_count", 0)),
+            "ratio_delta": _safe_ratio_delta(
+                float(bef_a.get("ratio", 0.0)), float(aft_a.get("ratio", 0.0)),
+            ),
+            "pass_before": bool(bef_a.get("pass", False)),
+            "pass_after": bool(aft_a.get("pass", False)),
+        },
+        "component_b": {
+            "informed_count_delta":
+                int(aft_b.get("informed_count", 0)) - int(bef_b.get("informed_count", 0)),
+            "uninformed_count_delta":
+                int(aft_b.get("uninformed_count", 0)) - int(bef_b.get("uninformed_count", 0)),
+            "ratio_delta": _safe_ratio_delta(
+                float(bef_b.get("ratio", 0.0)), float(aft_b.get("ratio", 0.0)),
+            ),
+            "pass_before": bool(bef_b.get("pass", False)),
+            "pass_after": bool(aft_b.get("pass", False)),
+        },
+    }
+
+    ide_version = before.get("ide_version") or after.get("ide_version") or "unknown"
+    if before.get("ide_version") and after.get("ide_version") and \
+       before["ide_version"] != after["ide_version"]:
+        ide_version = "mixed"
+    return {
+        "report_version": LOCKED_REPORT_VERSION,
+        "report_kind": "diff",
+        "ide": before.get("ide", after.get("ide", "unknown")),
+        "ide_version": ide_version,
+        "generated_at_iso": datetime.now(timezone.utc).isoformat(),
+        "before": before,
+        "after": after,
+        "delta": delta,
+    }
+
+
 def _build_argparser() -> argparse.ArgumentParser:
     """Construct the chat-report argparse.ArgumentParser."""
     ap = argparse.ArgumentParser(
@@ -1821,6 +2611,9 @@ def _build_argparser() -> argparse.ArgumentParser:
 
     ap.add_argument("--tools", choices=("all", "mcp", "optimus"), default="all",
                     help="Which tool calls to include (default: all)")
+    ap.add_argument("--shape", choices=("legacy", "locked"), default="legacy",
+                    help="Output JSON shape: 'legacy' (current) or 'locked' "
+                         "(MISSION-BRIEF section 4 contract). Default: legacy.")
     ap.add_argument("--format", choices=("md", "json", "both"), default="both",
                     help="Output format (default: both)")
     ap.add_argument("--dump-bubbles", action="store_true",
@@ -1847,6 +2640,8 @@ def _run_diff_mode(
     tools: str,
     fmt: str,
     out_dir: Path,
+    *,
+    shape: str = "legacy",
 ) -> int:
     """Diff mode: compare exactly two chats. Returns rc (0 ok, 1 on error)."""
     if len(resolved) != 2:
@@ -1865,14 +2660,42 @@ def _run_diff_mode(
         print(f"  ERROR — no data for chat {chat_b}", file=sys.stderr)
         return 1
 
-    report_a.pop("_orderedRaw", None)
-    report_b.pop("_orderedRaw", None)
+    ordered_a = report_a.pop("_orderedRaw", None)
+    ordered_b = report_b.pop("_orderedRaw", None)
+    report_a.pop("_perToolRollup", None)
+    report_b.pop("_perToolRollup", None)
 
-    diff = build_diff_report(report_a, report_b, tools)
     stem = f"diff-{chat_a[:12]}-vs-{chat_b[:12]}"
     md_path = out_dir / f"{stem}.md"
     json_path = out_dir / f"{stem}.json"
 
+    if shape == "locked":
+        rows_a = build_bubble_rows(ordered_a or [])
+        rows_b = build_bubble_rows(ordered_b or [])
+        locked_a = build_locked_report(
+            chat_a, report_a["meta"], rows_a, ordered_a or [],
+            input_id=input_a, resolved_from=source_a, filter_category=tools,
+        )
+        locked_b = build_locked_report(
+            chat_b, report_b["meta"], rows_b, ordered_b or [],
+            input_id=input_b, resolved_from=source_b, filter_category=tools,
+        )
+        diff = build_locked_diff_report(locked_a, locked_b)
+        if fmt in ("json", "both"):
+            write_json_report(json_path, diff)
+            print(f"  wrote {json_path}")
+        if fmt in ("md", "both"):
+            write_locked_md_diff(md_path, diff)
+            print(f"  wrote {md_path}")
+        d = diff["delta"]
+        print(
+            f"  total_tools delta={d['total_tool_calls']:+d}"
+            f"  optimus delta={d['component_a']['optimus_count_delta']:+d}"
+            f"  broad_sweep delta={d['component_a']['broad_sweep_count_delta']:+d}"
+        )
+        return 0
+
+    diff = build_diff_report(report_a, report_b, tools)
     if fmt in ("md", "both"):
         write_diff_md(md_path, diff, report_a, report_b, tools)
         print(f"  wrote {md_path}")
@@ -1889,6 +2712,8 @@ def _run_aggregate_mode(
     tools: str,
     fmt: str,
     out_dir: Path,
+    *,
+    shape: str = "legacy",
 ) -> int:
     """Aggregate mode: rollup across N chats. Returns rc (0 ok, 1 if any
     chat skipped or no valid chats)."""
@@ -1898,26 +2723,55 @@ def _run_aggregate_mode(
 
     print(f"[chat-report] aggregate: {len(resolved)} chats")
     rc = 0
-    reports: list[dict] = []
+    legacy_reports: list[dict] = []
+    locked_reports: list[dict] = []
     for chat_id, input_id, source in resolved:
         rpt = build_report(chat_id, state_con, track_con, tools, input_id, source)
         if rpt is None:
             print(f"  SKIP — no data for chat {chat_id}", file=sys.stderr)
             rc = 1
             continue
-        rpt.pop("_orderedRaw", None)
-        reports.append(rpt)
+        ordered = rpt.pop("_orderedRaw", None) or []
+        rpt.pop("_perToolRollup", None)
+        if shape == "locked":
+            rows = build_bubble_rows(ordered)
+            locked_reports.append(build_locked_report(
+                chat_id, rpt["meta"], rows, ordered,
+                input_id=input_id, resolved_from=source, filter_category=tools,
+            ))
+        else:
+            legacy_reports.append(rpt)
 
-    if not reports:
+    if shape != "locked" and not legacy_reports:
+        print("ERROR: no valid chats to aggregate", file=sys.stderr)
+        return 1
+    if shape == "locked" and not locked_reports:
         print("ERROR: no valid chats to aggregate", file=sys.stderr)
         return 1
 
-    agg = build_aggregate_report(reports, tools)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     stem = f"aggregate-{ts}"
     md_path = out_dir / f"{stem}.md"
     json_path = out_dir / f"{stem}.json"
 
+    if shape == "locked":
+        agg = build_locked_aggregate_report(locked_reports)
+        if fmt in ("json", "both"):
+            write_json_report(json_path, agg)
+            print(f"  wrote {json_path}")
+        if fmt in ("md", "both"):
+            write_locked_md_aggregate(md_path, agg)
+            print(f"  wrote {md_path}")
+        aggs = agg["aggregates"]
+        smc = aggs["success_metric_components"]
+        print(
+            f"  sessions={agg['session_count']} tools={aggs['total_tool_calls']} "
+            f"componentA_pass={smc['component_a']['pass']} "
+            f"componentB_pass={smc['component_b']['pass']}"
+        )
+        return rc
+
+    agg = build_aggregate_report(legacy_reports, tools)
     if fmt in ("md", "both"):
         write_aggregate_md(md_path, agg)
         print(f"  wrote {md_path}")
@@ -1938,6 +2792,8 @@ def _run_single_mode(
     fmt: str,
     out_dir: Path,
     dump_bubbles: bool,
+    *,
+    shape: str = "legacy",
 ) -> int:
     """Single-chat mode (default). Returns rc (0 ok, 1 if any chat skipped)."""
     rc = 0
@@ -1953,6 +2809,32 @@ def _run_single_mode(
 
         md_path = out_dir / f"{chat_id}.md"
         json_path = out_dir / f"{chat_id}.json"
+
+        if shape == "locked":
+            meta = report["meta"]
+            ordered = ordered_raw or []
+            rows = build_bubble_rows(ordered)
+            locked = build_locked_report(
+                chat_id, meta, rows, ordered,
+                input_id=input_id, resolved_from=source,
+                filter_category=tools,
+            )
+            if fmt in ("json", "both"):
+                write_json_report(json_path, locked)
+                print(f"  wrote {json_path}")
+            if fmt in ("md", "both"):
+                write_locked_md_report(md_path, locked)
+                print(f"  wrote {md_path}")
+            if dump_bubbles and ordered_raw is not None:
+                dump_path = out_dir / f"{chat_id}.bubbles.jsonl"
+                write_bubble_dump(dump_path, ordered_raw)
+                print(f"  wrote {dump_path}")
+            aggs = locked["aggregates"]
+            print(
+                f"  turns={len(locked['turns'])} tools={aggs['total_tool_calls']} "
+                f"denials={len(aggs['denials'])} errors={len(aggs['errors'])}"
+            )
+            continue
 
         if fmt in ("md", "both"):
             write_md_report(md_path, report, tools)
@@ -2069,14 +2951,16 @@ def main(argv: list[str] | None = None) -> int:
         if mode == "diff":
             return _run_diff_mode(
                 resolved, state_con, track_con, args.tools, args.format, out_dir,
+                shape=args.shape,
             )
         if mode == "aggregate":
             return _run_aggregate_mode(
                 resolved, state_con, track_con, args.tools, args.format, out_dir,
+                shape=args.shape,
             )
         return _run_single_mode(
             resolved, state_con, track_con, args.tools, args.format, out_dir,
-            args.dump_bubbles,
+            args.dump_bubbles, shape=args.shape,
         )
     finally:
         state_con.close()
