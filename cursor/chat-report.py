@@ -1800,6 +1800,367 @@ def build_report(chat_id: str, state_con: sqlite3.Connection, track_con: sqlite3
     return report
 
 
+# ---------------------------------------------------------------------------
+# Locked structured-report shape (MISSION-BRIEF section 4.1)
+# ---------------------------------------------------------------------------
+#
+# The locked shape is the integration contract that spike-1 telemetry,
+# success-metric evaluation (Components A and B), and M1.5 integration depend
+# on. Both Cursor and Claude Code variants emit the same shape; this module
+# implements the Cursor side. See MISSION-BRIEF.md section 4 for the canonical
+# schema.
+
+LOCKED_REPORT_VERSION = "1.0"
+
+# Tool-name → locked tool_class enum (Cursor's vocabulary).
+# directory-index-read is recovered by inspecting `params` for the DIRECTORY_INDEX.md
+# path -- this lookup table covers the plain mappings.
+_CURSOR_TOOL_CLASS_MAP: dict[str, str] = {
+    "read_file_v2": "broad-sweep-read",
+    "ripgrep_raw_search": "broad-sweep-grep",
+    "glob_file_search": "broad-sweep-glob",
+    "run_terminal_command_v2": "bash",
+    "edit_file_v2": "edit",
+}
+
+_LOCKED_TOOL_CLASSES: tuple[str, ...] = (
+    "broad-sweep-read", "broad-sweep-grep", "broad-sweep-glob",
+    "optimus-mcp", "directory-index-read",
+    "edit", "write", "bash", "other",
+)
+
+
+def normalize_session_id(session_id: str) -> str:
+    """Canonical session-ID form: lowercase, non-alphanumerics stripped.
+
+    Enables cross-IDE aggregation by content rather than IDE-specific format.
+    """
+    return re.sub(r"[^a-z0-9]", "", (session_id or "").lower())
+
+
+def _params_target_path(params: Any) -> str:
+    """Best-effort extraction of the file path from a tool-call params dict."""
+    if not isinstance(params, dict):
+        return ""
+    for key in ("targetFile", "file_path", "path", "uri", "effectiveUri"):
+        v = params.get(key)
+        if isinstance(v, str) and v:
+            return v
+    return ""
+
+
+def classify_tool_class_cursor(tool_name: str, params: Any) -> str:
+    """Map a Cursor tool-call to the locked tool_class enum.
+
+    DIRECTORY_INDEX.md reads are recovered from the params payload; optimus_*
+    MCP tools (post-``normalize_tool_name``) all collapse to ``optimus-mcp``.
+    """
+    name = (tool_name or "").strip()
+    if not name:
+        return "other"
+    base = _CURSOR_TOOL_CLASS_MAP.get(name)
+    if base == "broad-sweep-read":
+        path = _params_target_path(params)
+        if path and path.replace("\\", "/").endswith("DIRECTORY_INDEX.md"):
+            return "directory-index-read"
+        return "broad-sweep-read"
+    if base is not None:
+        return base
+    # optimus_* MCP names land here (already stripped of server prefix by
+    # ``normalize_tool_name`` upstream).
+    if name in _KNOWN_OPTIMUS_TOOLS or name.startswith("optimus_"):
+        return "optimus-mcp"
+    return "other"
+
+
+def classify_informed_precision_read(
+    tool_call: dict[str, Any],
+    prior_in_turn: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Classify a tool_call against the informed-precision-read heuristic.
+
+    ``tool_call`` is a locked-shape tool_call dict (or any dict with
+    ``tool_class`` set). ``prior_in_turn`` is the list of locked-shape tool_call
+    dicts that preceded this one within the same agent turn.
+
+    A Read is "informed" if it follows a DIRECTORY_INDEX.md read in the same
+    turn; otherwise "uninformed". Non-Read tool calls (and the dir-index read
+    itself) are classified as not-applicable.
+    """
+    tool_class = tool_call.get("tool_class")
+    if tool_class != "broad-sweep-read":
+        return {
+            "applicable": False,
+            "classification": "n/a",
+            "reason": f"tool_class={tool_class!r} is not a broad-sweep Read",
+        }
+    prior = prior_in_turn or []
+    saw_dir_index = any(p.get("tool_class") == "directory-index-read" for p in prior)
+    if saw_dir_index:
+        return {
+            "applicable": True,
+            "classification": "informed",
+            "reason": "preceded by a DIRECTORY_INDEX.md read in the same turn",
+        }
+    return {
+        "applicable": True,
+        "classification": "uninformed",
+        "reason": "no DIRECTORY_INDEX.md read preceded this Read in the same turn",
+    }
+
+
+def compute_success_metric_components(
+    by_class: dict[str, int],
+    informed_count: int,
+    uninformed_count: int,
+) -> dict[str, Any]:
+    """Compute Components A and B per ``docs/decisions/success-metric.md``.
+
+    Component A: optimus-mcp count >= 1.0x (broad-sweep-read + grep + glob) count.
+    Component B: informed-precision-read count >= 1.0x uninformed-read count.
+    Overall: A AND B. partial_pass: A XOR B.
+
+    Edge cases:
+    - Zero denominator with zero numerator => ratio 1.0, pass=True (trivial).
+    - Zero denominator with positive numerator => ratio inf, pass=True.
+    """
+    optimus = int(by_class.get("optimus-mcp", 0))
+    broad_sweep = sum(int(by_class.get(k, 0)) for k in (
+        "broad-sweep-read", "broad-sweep-grep", "broad-sweep-glob",
+    ))
+    if broad_sweep == 0:
+        ratio_a = 1.0 if optimus == 0 else float("inf")
+    else:
+        ratio_a = optimus / broad_sweep
+    pass_a = optimus >= broad_sweep
+
+    informed = int(informed_count)
+    uninformed = int(uninformed_count)
+    if uninformed == 0:
+        ratio_b = 1.0 if informed == 0 else float("inf")
+    else:
+        ratio_b = informed / uninformed
+    pass_b = informed >= uninformed
+
+    overall_pass = pass_a and pass_b
+    partial_pass = (pass_a or pass_b) and not overall_pass
+
+    return {
+        "component_a": {
+            "definition": "optimus_* count >= 1.0x broad-sweep (read+grep+glob) count",
+            "optimus_count": optimus,
+            "broad_sweep_count": broad_sweep,
+            "ratio": ratio_a,
+            "pass": pass_a,
+        },
+        "component_b": {
+            "definition": "informed-precision-read count >= 1.0x uninformed-read count",
+            "informed_count": informed,
+            "uninformed_count": uninformed,
+            "ratio": ratio_b,
+            "pass": pass_b,
+            "heuristic_failure_modes_flagged": [],
+        },
+        "overall": {
+            "pass": overall_pass,
+            "partial_pass": partial_pass,
+        },
+    }
+
+
+def _group_rows_into_turns(rows: list[BubbleRow]) -> list[list[BubbleRow]]:
+    """Group consecutive same-role bubbles into agent turns.
+
+    A turn boundary is where the role flips (user -> assistant or vice versa).
+    Bubbles with unknown role (type == -1) attach to the preceding turn, or
+    start their own turn if there is none yet.
+    """
+    turns: list[list[BubbleRow]] = []
+    current_role: int | None = None
+    for r in rows:
+        if current_role is None or (r.type in (1, 2) and r.type != current_role):
+            turns.append([])
+            current_role = r.type if r.type in (1, 2) else current_role
+        turns[-1].append(r)
+    return turns
+
+
+def _denial_reason_from_preview(preview_text: str) -> str | None:
+    """Pull a deterministic denial reason from a result preview string."""
+    if not preview_text:
+        return None
+    return preview_text.strip()[:200] or None
+
+
+def _build_locked_tool_call(
+    call_index: int,
+    raw_payload: dict[str, Any],
+    extracted: dict[str, Any],
+) -> dict[str, Any]:
+    """Convert a single extracted tool call into the locked tool_call shape.
+
+    ``extracted`` is the dict returned by :func:`extract_tool_call`; ``raw_payload``
+    is the underlying bubble payload (used for ``input_payload`` recovery).
+    """
+    params = extracted.get("params")
+    tool_name = extracted.get("name") or ""
+    tool_class = classify_tool_class_cursor(tool_name, params)
+
+    is_denial = bool(extracted.get("isDenial"))
+    is_error = bool(extracted.get("isError"))
+    status = extracted.get("status")
+    if is_denial:
+        output_status = "denied"
+    elif is_error:
+        output_status = "error"
+    elif status in (None, "completed"):
+        output_status = "ok"
+    else:
+        output_status = "error"
+
+    result_preview = extracted.get("resultPreview") or ""
+    return {
+        "call_index": call_index,
+        "tool_name": tool_name,
+        "tool_class": tool_class,
+        "input_summary": preview(params, 180),
+        "input_payload": params if params is not None else {},
+        "output_summary": result_preview,
+        "output_status": output_status,
+        "denial_reason": _denial_reason_from_preview(result_preview) if is_denial else None,
+        "elapsed_ms": None,  # Cursor does not capture per-call duration
+        "informed_precision_read": {
+            "applicable": False,
+            "classification": "n/a",
+            "reason": "filled in after turn-walk",
+        },
+    }
+
+
+def build_locked_report(
+    chat_id: str,
+    meta: dict[str, Any],
+    rows: list[BubbleRow],
+    ordered_raw: list[tuple[int, str, dict[str, Any]]],
+    *,
+    input_id: str | None = None,
+    resolved_from: str | None = None,
+    ide_version: str = "unknown",
+    filter_category: str = "all",
+) -> dict[str, Any]:
+    """Build a MISSION-BRIEF section-4-conformant locked report from a Cursor chat.
+
+    Parameters mirror :func:`build_report` plus an ``ide_version`` hint. The
+    output dict is downstream-ready for spike-1 telemetry, success-metric
+    evaluation, and M1.5 integration -- no IDE-specific branching needed.
+    """
+    raw_by_id = {bid: payload for _, bid, payload in ordered_raw}
+
+    start_ms = meta.get("createdAt")
+    end_ms = meta.get("lastUpdatedAt")
+    start_iso = epoch_ms_to_iso(start_ms) if isinstance(start_ms, (int, float)) else None
+    end_iso = epoch_ms_to_iso(end_ms) if isinstance(end_ms, (int, float)) else None
+    if isinstance(start_ms, (int, float)) and isinstance(end_ms, (int, float)) and end_ms >= start_ms:
+        duration_s = int((end_ms - start_ms) // 1000)
+    else:
+        duration_s = 0
+
+    turns_data: list[dict[str, Any]] = []
+    by_class: dict[str, int] = {k: 0 for k in _LOCKED_TOOL_CLASSES}
+    informed_count = 0
+    uninformed_count = 0
+    denials: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    global_call_counter = 0
+
+    for turn_index, group in enumerate(_group_rows_into_turns(rows)):
+        role = "user" if group and group[0].type == 1 else "assistant"
+        prior_in_turn: list[dict[str, Any]] = []
+        tool_calls: list[dict[str, Any]] = []
+        for row in group:
+            if not row.toolCall:
+                continue
+            if not _category_included(row.toolCall["category"], filter_category):
+                continue
+            raw_payload = raw_by_id.get(row.bubbleId, {})
+            tc = _build_locked_tool_call(global_call_counter, raw_payload, row.toolCall)
+            global_call_counter += 1
+            # Now that tool_class is known for this call AND all prior calls in
+            # the turn, classify the informed-precision-read signal.
+            tc["informed_precision_read"] = classify_informed_precision_read(tc, prior_in_turn)
+            ipr = tc["informed_precision_read"]
+            if ipr["applicable"]:
+                if ipr["classification"] == "informed":
+                    informed_count += 1
+                elif ipr["classification"] == "uninformed":
+                    uninformed_count += 1
+            by_class[tc["tool_class"]] = by_class.get(tc["tool_class"], 0) + 1
+            if tc["output_status"] == "denied":
+                denials.append({
+                    "tool_name": tc["tool_name"],
+                    "denial_reason": tc["denial_reason"] or "",
+                    "turn_index": turn_index,
+                    "call_index": tc["call_index"],
+                })
+            elif tc["output_status"] == "error":
+                errors.append({
+                    "tool_name": tc["tool_name"],
+                    "error_excerpt": (tc["output_summary"] or "")[:200],
+                    "turn_index": turn_index,
+                    "call_index": tc["call_index"],
+                })
+            prior_in_turn.append(tc)
+            tool_calls.append(tc)
+
+        turns_data.append({
+            "turn_index": turn_index,
+            "role": role,
+            "started_iso": start_iso or "",
+            "ended_iso": end_iso or "",
+            "tool_calls": tool_calls,
+        })
+
+    warnings.append({
+        "code": "cursor-per-turn-timestamps-synthesized",
+        "message": (
+            "Cursor's bubble store does not expose per-bubble timestamps; "
+            "all turns share the session start/end ISO bounds."
+        ),
+    })
+
+    success_metrics = compute_success_metric_components(
+        by_class, informed_count, uninformed_count,
+    )
+
+    out: dict[str, Any] = {
+        "report_version": LOCKED_REPORT_VERSION,
+        "report_kind": "single-chat",
+        "ide": "cursor",
+        "ide_version": ide_version,
+        "session_id": chat_id,
+        "session_id_normalized": normalize_session_id(chat_id),
+        "session_start_iso": start_iso or "",
+        "session_end_iso": end_iso or "",
+        "session_duration_s": duration_s,
+        "turns": turns_data,
+        "aggregates": {
+            "total_tool_calls": sum(by_class.values()),
+            "by_class": by_class,
+            "success_metric_components": success_metrics,
+            "denials": denials,
+            "errors": errors,
+        },
+        "warnings": warnings,
+    }
+    if input_id and input_id != chat_id:
+        out["resolved_from"] = {
+            "input_id": input_id,
+            "source": resolved_from or "",
+        }
+    return out
+
+
 def _build_argparser() -> argparse.ArgumentParser:
     """Construct the chat-report argparse.ArgumentParser."""
     ap = argparse.ArgumentParser(
@@ -1821,6 +2182,9 @@ def _build_argparser() -> argparse.ArgumentParser:
 
     ap.add_argument("--tools", choices=("all", "mcp", "optimus"), default="all",
                     help="Which tool calls to include (default: all)")
+    ap.add_argument("--shape", choices=("legacy", "locked"), default="legacy",
+                    help="Output JSON shape: 'legacy' (current) or 'locked' "
+                         "(MISSION-BRIEF section 4 contract). Default: legacy.")
     ap.add_argument("--format", choices=("md", "json", "both"), default="both",
                     help="Output format (default: both)")
     ap.add_argument("--dump-bubbles", action="store_true",
@@ -1847,8 +2211,15 @@ def _run_diff_mode(
     tools: str,
     fmt: str,
     out_dir: Path,
+    *,
+    shape: str = "legacy",
 ) -> int:
     """Diff mode: compare exactly two chats. Returns rc (0 ok, 1 on error)."""
+    if shape == "locked":
+        raise NotImplementedError(
+            "locked-shape diff mode is deferred to commit 2 of Part A. "
+            "Use --shape=legacy for diff output until then."
+        )
     if len(resolved) != 2:
         print("ERROR: --diff requires exactly two IDs", file=sys.stderr)
         return 1
@@ -1889,9 +2260,16 @@ def _run_aggregate_mode(
     tools: str,
     fmt: str,
     out_dir: Path,
+    *,
+    shape: str = "legacy",
 ) -> int:
     """Aggregate mode: rollup across N chats. Returns rc (0 ok, 1 if any
     chat skipped or no valid chats)."""
+    if shape == "locked":
+        raise NotImplementedError(
+            "locked-shape aggregate mode is deferred to commit 3 of Part A. "
+            "Use --shape=legacy for aggregate output until then."
+        )
     if len(resolved) < 1:
         print("ERROR: --aggregate requires at least one ID", file=sys.stderr)
         return 1
@@ -1938,6 +2316,8 @@ def _run_single_mode(
     fmt: str,
     out_dir: Path,
     dump_bubbles: bool,
+    *,
+    shape: str = "legacy",
 ) -> int:
     """Single-chat mode (default). Returns rc (0 ok, 1 if any chat skipped)."""
     rc = 0
@@ -1953,6 +2333,33 @@ def _run_single_mode(
 
         md_path = out_dir / f"{chat_id}.md"
         json_path = out_dir / f"{chat_id}.json"
+
+        if shape == "locked":
+            meta = report["meta"]
+            ordered = ordered_raw or []
+            rows = build_bubble_rows(ordered)
+            locked = build_locked_report(
+                chat_id, meta, rows, ordered,
+                input_id=input_id, resolved_from=source,
+                filter_category=tools,
+            )
+            if fmt in ("json", "both"):
+                write_json_report(json_path, locked)
+                print(f"  wrote {json_path}")
+            if fmt in ("md", "both"):
+                # Markdown rendering of locked shape is deferred to commit 4.
+                print("  note: --shape=locked markdown output is deferred to commit 4; "
+                      "JSON written above", file=sys.stderr)
+            if dump_bubbles and ordered_raw is not None:
+                dump_path = out_dir / f"{chat_id}.bubbles.jsonl"
+                write_bubble_dump(dump_path, ordered_raw)
+                print(f"  wrote {dump_path}")
+            aggs = locked["aggregates"]
+            print(
+                f"  turns={len(locked['turns'])} tools={aggs['total_tool_calls']} "
+                f"denials={len(aggs['denials'])} errors={len(aggs['errors'])}"
+            )
+            continue
 
         if fmt in ("md", "both"):
             write_md_report(md_path, report, tools)
@@ -2069,14 +2476,16 @@ def main(argv: list[str] | None = None) -> int:
         if mode == "diff":
             return _run_diff_mode(
                 resolved, state_con, track_con, args.tools, args.format, out_dir,
+                shape=args.shape,
             )
         if mode == "aggregate":
             return _run_aggregate_mode(
                 resolved, state_con, track_con, args.tools, args.format, out_dir,
+                shape=args.shape,
             )
         return _run_single_mode(
             resolved, state_con, track_con, args.tools, args.format, out_dir,
-            args.dump_bubbles,
+            args.dump_bubbles, shape=args.shape,
         )
     finally:
         state_con.close()
