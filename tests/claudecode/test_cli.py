@@ -138,12 +138,7 @@ def test_cli_session_id_override_in_report(claudecode_chat_report, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Deferred mode escape hatches
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Multi-ID guard
+# --session-jsonl pairing
 # ---------------------------------------------------------------------------
 
 
@@ -155,7 +150,24 @@ def test_cli_rejects_multiple_ids_in_single_mode(claudecode_chat_report, tmp_pat
     ])
     assert rc == 2
     err = capsys.readouterr().err
-    assert "exactly one session UUID" in err
+    # 1 id but 2 ids on the line: strict-pairing precondition fires before
+    # the "exactly one session UUID" guard (1 path vs 2 ids).
+    assert "--session-jsonl was given 1 path" in err
+
+
+def test_cli_rejects_more_session_jsonls_than_ids(claudecode_chat_report,
+                                                    tmp_path, capsys):
+    """1 id + 2 --session-jsonl: extras would have been silently ignored
+    before the strict-pairing precondition was added."""
+    rc = claudecode_chat_report.main([
+        "only-one-id",
+        "--session-jsonl", str(tmp_path / "x.jsonl"),
+        "--session-jsonl", str(tmp_path / "y.jsonl"),
+    ])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "--session-jsonl was given 2 path" in err
+    assert "1 positional id" in err
 
 
 # ---------------------------------------------------------------------------

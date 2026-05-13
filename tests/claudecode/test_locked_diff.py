@@ -17,17 +17,11 @@ two synthetic JSONL fixtures and asserts:
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
-
-import pytest
 
 from common import _locked_contract as contract
 
 from . import _fixtures as fx
-
-
-_DELIM = re.compile(r"^[A-Za-z0-9]+$")
 
 
 def _write_session(

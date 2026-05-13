@@ -10,7 +10,7 @@ script, read the report.
 Modes:
   Single-chat (default)  -- per-session report
   --diff <idA> <idB>     -- before/after comparison between two sessions
-  --aggregate <id> ...   -- rollup across N sessions (deferred to next commit)
+  --aggregate <id> ...   -- rollup across N sessions
 
 Source: Claude Code's on-disk JSONL store. Path layout per DISCOVERY.md
 Q1:
@@ -115,7 +115,7 @@ def _build_argparser() -> argparse.ArgumentParser:
     )
     g.add_argument(
         "--aggregate", action="store_true",
-        help="Aggregate mode: rollup across N sessions. Deferred to a later commit.",
+        help="Aggregate mode: rollup across N sessions.",
     )
     return p
 
@@ -269,6 +269,18 @@ def _run_aggregate(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_argparser().parse_args(argv)
+
+    # Strict pairing: when --session-jsonl is given at all, its count must
+    # match the number of positional ids. Avoids silently mispairing when a
+    # caller passes too many paths (e.g., 1 id + 2 paths) or too few.
+    if args.session_jsonl and len(args.session_jsonl) != len(args.ids):
+        sys.stderr.write(
+            f"chat-report: --session-jsonl was given {len(args.session_jsonl)} "
+            f"path(s) but there are {len(args.ids)} positional id(s). Pass one "
+            f"--session-jsonl per id (in the same order), or omit "
+            f"--session-jsonl entirely to resolve via --cwd / CLAUDE_CONFIG_DIR.\n"
+        )
+        return 2
 
     if args.diff:
         return _run_diff(args)
