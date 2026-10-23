@@ -34,12 +34,14 @@ def _touched(report: dict[str, Any]) -> list[str]:
         ("context_attached", "rule"): 3, ("context_attached", "agent_doc"): 3,
         ("context_attached", "hook"): 3, ("explicit_read", "hook"): 3, ("explicit_edit", "hook"): 3,
     }
-    items = [
-        (priority[(item["source"], item["kind"])], item["path"])
-        for item in report["session"]["customizations"]
-        if (item["source"], item["kind"]) in priority
-    ]
-    return [path for _, path in sorted(set(items), key=lambda item: (item[0], item[1]))]
+    best_priority: dict[str, int] = {}
+    for item in report["session"]["customizations"]:
+        key = (item["source"], item["kind"])
+        if key not in priority:
+            continue
+        path = item["path"]
+        best_priority[path] = min(best_priority.get(path, priority[key]), priority[key])
+    return [path for _, path in sorted((value, key) for key, value in best_priority.items())]
 
 
 def _append_budgeted(heading: str, lines: list[str], omitted: str, budget: int, reserve: int = 55) -> str:

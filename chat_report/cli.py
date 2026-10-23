@@ -98,13 +98,29 @@ def _reserve_aggregate_paths(
                 path.unlink(missing_ok=True)
             sequence += 1
             continue
+        except OSError:
+            for descriptor in descriptors:
+                os.close(descriptor)
+            for path in paths[:len(descriptors)]:
+                path.unlink(missing_ok=True)
+            raise
         try:
-            for descriptor, content in zip(descriptors, contents):
+            for index, (descriptor, content) in enumerate(zip(descriptors, contents)):
                 with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    descriptors[index] = -1
                     handle.write(content)
         except BaseException:
+            for descriptor in descriptors:
+                if descriptor >= 0:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
             for path in paths:
-                path.unlink(missing_ok=True)
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
             raise
         return paths
 

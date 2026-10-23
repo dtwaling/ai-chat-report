@@ -11,7 +11,7 @@ from chat_report.adapters.cursor.adapter import CursorAdapter
 from chat_report.core.adapter import ExtractOptions
 from chat_report.core.classifier import classify_session
 from chat_report.core.compare import build_aggregate_report, build_diff_report, build_single_session_report
-from chat_report.core.render.digest import MAX_DIGEST_OUTPUT_PATH_CHARS, render_agent_digest
+from chat_report.core.render.digest import MAX_DIGEST_OUTPUT_PATH_CHARS, _touched, render_agent_digest
 from chat_report.core.render.json_v2 import assert_v2_report_conforms
 from chat_report.core.render.markdown import render_aggregate_md, render_diff_md, render_single_session_md
 from tests._fixtures import create_synthetic_state_db, create_synthetic_tracking_db
@@ -65,6 +65,14 @@ def test_validator_rejects_corrupt_session_turn_diff_and_aggregate(tmp_path: Pat
     aggregate["rollup"]["total_thinking_blocks"] += 1
     with pytest.raises(ValueError, match="aggregate thinking"):
         assert_v2_report_conforms(aggregate)
+    mismatched_subagents = deepcopy(report)
+    mismatched_subagents["aggregates"]["customization_summary"]["subagents_spawned"] = 1
+    with pytest.raises(ValueError, match="subagent count"):
+        assert_v2_report_conforms(mismatched_subagents)
+    mismatched_skills = deepcopy(report)
+    mismatched_skills["aggregates"]["customization_summary"]["skills_read"] = ["skills/not-read/SKILL.md"]
+    with pytest.raises(ValueError, match="skills_read"):
+        assert_v2_report_conforms(mismatched_skills)
 
 
 def test_diff_and_aggregate_render(tmp_path: Path) -> None:
@@ -99,7 +107,7 @@ def test_diff_and_aggregate_render(tmp_path: Path) -> None:
         "New finding IDs: None",
         "## 5. Attribution Delta",
         "Composer hashes: +0; human hashes: +0",
-        "Lines: +0 / -0",
+        "Lines: +0 / +0",
     ):
         assert value in diff_markdown
     aggregate_markdown = render_aggregate_md(aggregate)
@@ -121,6 +129,11 @@ def test_diff_and_aggregate_render(tmp_path: Path) -> None:
 
 def test_markdown_sections_and_digest_bounds_under_adversarial_input(tmp_path: Path) -> None:
     report = _report(tmp_path)
+    report["session"]["customizations"] = [
+        {"kind": "rule", "path": ".cursor/rules/test.mdc", "source": "context_attached", "turn_index": 1},
+        {"kind": "skill", "path": "skills/demo/SKILL.md", "source": "explicit_read", "turn_index": 1},
+        {"kind": "agent_doc", "path": "AGENTS.md", "source": "explicit_read", "turn_index": 1},
+    ]
     report["aggregates"]["customization_summary"].update(
         {
             "attached_rules": [".cursor/rules/test.mdc"],
@@ -129,8 +142,9 @@ def test_markdown_sections_and_digest_bounds_under_adversarial_input(tmp_path: P
             "subagents_spawned": 1,
         }
     )
-    report["aggregates"]["mcp_calls_by_namespace"] = {"demo": 1}
-    report["aggregates"]["subagent_rollup"]["by_type"] = {"generalPurpose": 1}
+    report["aggregates"]["subagent_rollup"].update(
+        {"count": 1, "by_type": {"generalPurpose": 1}, "by_status": {"completed": 1}, "total_tool_calls": 2, "total_errors": 0}
+    )
     report["session"]["subagents"] = [
         {
             "session_id": "child-session",
@@ -148,6 +162,10 @@ def test_markdown_sections_and_digest_bounds_under_adversarial_input(tmp_path: P
             "rules_read": ["AGENTS.md"],
         }
     ]
+    report["turns"][0]["tool_calls"][0].update({"canonical_kind": "mcp_discovery", "semantic_class": "dynamic-tool-discovery", "mcp_namespace": "demo"})
+    report["aggregates"]["tool_calls_by_canonical_kind"] = {"file_read": 9, "mcp_discovery": 1}
+    report["aggregates"]["tool_calls_by_semantic_class"] = {"dynamic-tool-discovery": 1, "native-read": 9}
+    assert_v2_report_conforms(report)
     report["session"]["reasoning_effort"] = "medium"
     report["session"]["orphan_bubble_count"] = 2
     report["session"]["token_breakdown"]["by_category"]["summarized_conversation"] = {"tokens": 1, "chars": 4}
@@ -182,10 +200,11 @@ def test_markdown_sections_and_digest_bounds_under_adversarial_input(tmp_path: P
         ".cursor/rules/test.mdc",
         "skills/demo/SKILL.md",
         "AGENTS.md",
-        "demo: 1 calls",
+        "demo: 0 calls",
+        "Total spawned: 1",
         "generalPurpose: 1",
         "0 anomalies detected",
-        "| native-edit | 1 | 0 | 0 | 50.0 | 50 | 50 |",
+        "| dynamic-tool-discovery | 1 | 0 | 0 | 50.0 | 50 | 50 |",
         "| native-read | 9 | 0 | 0 | 50.0 | 50 | 450 |",
         "read_file_v2=9",
         "| generalPurpose | `child-session` | 1 | 2 | 0 | skills/demo/SKILL.md | 25 |",
@@ -258,3 +277,16 @@ def test_markdown_sections_and_digest_bounds_under_adversarial_input(tmp_path: P
     assert "\n## Customizations Touched\n" in digest
     with pytest.raises(ValueError):
         render_agent_digest(report, "x" * (MAX_DIGEST_OUTPUT_PATH_CHARS + 1), "ok")
+
+
+def test_touched_customizations_use_best_priority_and_skip_workspace_active(tmp_path: Path) -> None:
+    report = _report(tmp_path)
+    report["session"]["customizations"] = [
+        {"kind": "rule", "path": "same.mdc", "source": "context_attached", "turn_index": 1},
+        {"kind": "rule", "path": "same.mdc", "source": "explicit_read", "turn_index": 1},
+        {"kind": "hook", "path": "hooks.json", "source": "explicit_edit", "turn_index": 1},
+        {"kind": "skill", "path": "demo/SKILL.md", "source": "context_attached", "turn_index": 1},
+        {"kind": "agent_doc", "path": "AGENTS.md", "source": "explicit_read", "turn_index": 1},
+        {"kind": "skill", "path": "ignored/SKILL.md", "source": "workspace_active", "turn_index": None},
+    ]
+    assert _touched(report) == ["demo/SKILL.md", "AGENTS.md", "same.mdc", "hooks.json"]

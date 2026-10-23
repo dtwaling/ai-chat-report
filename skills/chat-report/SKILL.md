@@ -1,6 +1,6 @@
 ---
 name: chat-report
-description: Inspect Cursor chat sessions and diagnose customization or harness failures.
+description: Inspect Cursor chat sessions ("chat report", "under the hood", "why did the agent ignore my skill/rule") and diagnose customization or harness failures.
 ---
 
 # Chat Report
@@ -34,7 +34,7 @@ If Stage 1 reports `0` HIGH and `0` MEDIUM findings, has `0` H08 friction signal
 
 Dispatch one `generalPurpose` subagent named `Customization & Harness Conflict Auditor` when any H01 through H08 HIGH or MEDIUM finding fires, an H08 friction signal fires, the user asks why a skill, rule, hook, or tool failed or was ignored, or the user requests root-cause analysis or a deep customization audit even when Stage 1 reports zero findings.
 
-Give it the generated `<session_id>.json`, the exact touched customization files listed in `Audit Inputs:` or `session.customizations`, and the tool/thinking trace. It must read the applicable `SKILL.md`, `.mdc`, `.cursorrules`, `AGENTS.md`, `CLAUDE.md`, and `.cursor/hooks.json` files and return:
+Give it the generated `<session_id>.json`, the list of triggered H01-H08 findings from the digest, the exact touched customization files listed in `Audit Inputs:` or `session.customizations`, and the tool/thinking trace. It must read the applicable `SKILL.md`, `.mdc`, `.cursorrules`, `AGENTS.md`, `CLAUDE.md`, and `.cursor/hooks.json` files and return:
 
 1. Root Cause
 2. Conflicting Directives

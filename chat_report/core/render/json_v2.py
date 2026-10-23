@@ -22,6 +22,7 @@ def _assert(condition: bool, message: str) -> None:
 
 
 def _keys(value: dict[str, Any], expected: set[str], label: str) -> None:
+    _assert(isinstance(value, dict), f"{label} must be an object")
     _assert(set(value) == expected, f"{label} keys differ: {set(value) ^ expected}")
 
 
@@ -124,7 +125,11 @@ def _assert_session_block(session: Any) -> None:
         _assert(resolved["session_id"] == session["session_id"], "resolved_from session ID mismatch")
 
 
-def _assert_aggregates(aggregates: Any, turns: list[dict[str, Any]] | None) -> None:
+def _assert_aggregates(
+    aggregates: Any,
+    turns: list[dict[str, Any]] | None,
+    session: dict[str, Any] | None = None,
+) -> None:
     _assert(isinstance(aggregates, dict), "aggregates must be an object")
     expected = {"turn_count", "thinking_block_count", "total_thinking_duration_ms", "tool_calls_total", "tool_calls_by_semantic_class", "tool_calls_by_canonical_kind", "mcp_calls_by_namespace", "status_counts", "timing", "customization_summary", "subagent_rollup"}
     _keys(aggregates, expected, "aggregates")
@@ -142,6 +147,17 @@ def _assert_aggregates(aggregates: Any, turns: list[dict[str, Any]] | None) -> N
     if turns is not None:
         _assert(aggregates["thinking_block_count"] == sum(len(turn["thinking_blocks"]) for turn in turns), "thinking block count mismatch")
         _assert(aggregates["tool_calls_total"] == sum(len(turn["tool_calls"]) for turn in turns), "tool call total mismatch")
+        expected_semantic = dict(sorted(Counter(call["semantic_class"] for turn in turns for call in turn["tool_calls"]).items()))
+        expected_kinds = dict(sorted(Counter(call["canonical_kind"] for turn in turns for call in turn["tool_calls"]).items()))
+        expected_namespaces = dict(sorted(Counter(
+            call["mcp_namespace"]
+            for turn in turns
+            for call in turn["tool_calls"]
+            if call["canonical_kind"] == "mcp_call" and call["mcp_namespace"]
+        ).items()))
+        _assert(aggregates["tool_calls_by_semantic_class"] == expected_semantic, "semantic class counts mismatch")
+        _assert(aggregates["tool_calls_by_canonical_kind"] == expected_kinds, "canonical kind counts mismatch")
+        _assert(aggregates["mcp_calls_by_namespace"] == expected_namespaces, "MCP namespace counts mismatch")
     timing = aggregates["timing"]
     _keys(timing, {"total_session_ms", "total_tool_elapsed_ms", "slowest_tool_calls"}, "timing")
     _int(timing["total_session_ms"], "timing.total_session_ms", nullable=True)
@@ -164,7 +180,25 @@ def _assert_aggregates(aggregates: Any, turns: list[dict[str, Any]] | None) -> N
     for key in ("skills_read", "rules_read", "attached_rules"):
         _assert(isinstance(customization[key], list) and customization[key] == sorted(set(customization[key])), f"{key} must be sorted distinct paths")
     _int(customization["subagents_spawned"], "subagents_spawned")
-    _keys(aggregates["subagent_rollup"], {"count", "by_type", "by_status", "total_tool_calls", "total_errors"}, "subagent rollup")
+    rollup = aggregates["subagent_rollup"]
+    _keys(rollup, {"count", "by_type", "by_status", "total_tool_calls", "total_errors"}, "subagent rollup")
+    _int(rollup["count"], "subagent rollup.count")
+    _count_map(rollup["by_type"], "subagent rollup.by_type")
+    _count_map(rollup["by_status"], "subagent rollup.by_status")
+    _int(rollup["total_tool_calls"], "subagent rollup.total_tool_calls")
+    _int(rollup["total_errors"], "subagent rollup.total_errors")
+    if session is not None:
+        customizations = session["customizations"]
+        subagents = session["subagents"]
+        _assert(customization["subagents_spawned"] == len(subagents) == rollup["count"], "subagent count mismatch")
+        _assert(rollup["total_tool_calls"] == sum(item["tool_call_count"] for item in subagents), "subagent tool call total mismatch")
+        _assert(rollup["total_errors"] == sum(item["error_count"] for item in subagents), "subagent error total mismatch")
+        expected_skills = sorted({item["path"] for item in customizations if item["kind"] == "skill" and item["source"] == "explicit_read"})
+        expected_rules = sorted({item["path"] for item in customizations if item["kind"] in ("rule", "agent_doc") and item["source"] == "explicit_read"})
+        expected_attached = sorted({item["path"] for item in customizations if item["kind"] in ("rule", "agent_doc") and item["source"] == "context_attached"})
+        _assert(customization["skills_read"] == expected_skills, "skills_read customization summary mismatch")
+        _assert(customization["rules_read"] == expected_rules, "rules_read customization summary mismatch")
+        _assert(customization["attached_rules"] == expected_attached, "attached_rules customization summary mismatch")
 
 
 def _assert_diagnostics(diagnostics: Any) -> None:
@@ -264,7 +298,7 @@ def _assert_single(payload: dict[str, Any]) -> None:
         _assert_turn(turn, index)
     call_indexes = [call["call_index"] for turn in payload["turns"] for call in turn["tool_calls"]]
     _assert(call_indexes == list(range(1, len(call_indexes) + 1)), "call indexes must be sequential")
-    _assert_aggregates(payload["aggregates"], payload["turns"])
+    _assert_aggregates(payload["aggregates"], payload["turns"], session=payload["session"])
     _assert_diagnostics(payload["diagnostics"])
 
 
@@ -362,6 +396,7 @@ def assert_v2_report_conforms(payload: dict[str, Any]) -> None:
         _assert_envelope(payload, "aggregate")
         _keys(payload, {"schema_version", "report_kind", "generated_at_iso", "harness", "harness_version", "warnings", "session_count", "sessions", "rollup"}, "aggregate report")
         _int(payload["session_count"], "session_count")
+        _assert(isinstance(payload["sessions"], list), "aggregate sessions must be a list")
         _assert(payload["session_count"] == len(payload["sessions"]) >= 2, "aggregate session count must be at least two")
         summary_keys = {"session_id", "session_id_normalized", "title", "model_name", "status", "duration_ms", "total_lines_added", "total_lines_removed", "attribution", "aggregates", "diagnostics"}
         for summary in payload["sessions"]:

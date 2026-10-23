@@ -49,6 +49,10 @@ def test_all_modes_and_cli_restrictions(tmp_path: Path, capsys: pytest.CaptureFi
     with pytest.raises(SystemExit) as list_error:
         main(["--list-include-subagents", *arguments])
     assert list_error.value.code == 2
+    with pytest.raises(SystemExit) as latest_subagents_error:
+        main(["--latest", "--list-include-subagents", *arguments])
+    assert latest_subagents_error.value.code == 2
+    assert main(["--list-recent", "5", "--list-include-subagents", *arguments]) == 0
     with pytest.raises(SystemExit) as latest_error:
         main(["--latest", "--request-id", *arguments])
     assert latest_error.value.code == 2
@@ -118,6 +122,28 @@ def test_env_db_overrides_and_tracking_fallback(
     assert main(["--latest", "--out", str(output)]) == 0
     payload = json.loads((output / f"{DEFAULT_SESSION_ID}.json").read_text(encoding="utf-8"))
     assert any(item["code"] == "cursor-tracking-db-unavailable" for item in payload["warnings"])
+
+
+def test_state_db_precedence_missing_state_and_default_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = create_synthetic_state_db(tmp_path / "state.vscdb")
+    tracking = create_synthetic_tracking_db(tmp_path / "tracking.db")
+    output = tmp_path / "out"
+    monkeypatch.setenv("CURSOR_STATE_DB", str(tmp_path / "missing_env_state.vscdb"))
+    assert main(["--latest", "--state-db", str(state), "--tracking-db", str(tracking), "--out", str(output)]) == 0
+    assert main(["--latest", "--state-db", str(tmp_path / "missing_explicit_state.vscdb"), "--out", str(output)]) == 1
+    monkeypatch.chdir(tmp_path)
+    observed_workspaces: list[Path] = []
+    classify = cli.classify_session
+
+    def capture_workspace(session: object, workspace: Path) -> object:
+        observed_workspaces.append(workspace)
+        return classify(session, workspace)
+
+    monkeypatch.setattr(cli, "classify_session", capture_workspace)
+    assert main(["--latest", "--state-db", str(state), "--tracking-db", str(tracking), "--out", str(output)]) == 0
+    assert observed_workspaces == [tmp_path]
 
 
 def _load_module(path: Path) -> ModuleType:

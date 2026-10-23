@@ -68,7 +68,10 @@ def render_single_session_md(report: dict[str, Any]) -> str:
         "### MCP Namespaces Discovered & Called",
         _lines([f"{name}: {namespace_counts.get(name, 0)} calls" for name in sorted(set(discovered) | set(namespace_counts))]),
         "### Subagents Dispatched",
-        _lines([f"{name}: {count}" for name, count in aggregates["subagent_rollup"]["by_type"].items()] or [str(summary["subagents_spawned"])]),
+        _lines(
+            [f"Total spawned: {summary['subagents_spawned']}"]
+            + [f"{name}: {count}" for name, count in aggregates["subagent_rollup"]["by_type"].items()]
+        ),
         "",
         "## 3. Diagnostic Findings",
     ])
@@ -145,7 +148,7 @@ def render_diff_md(report: dict[str, Any]) -> str:
         f"- Persisting finding keys: {', '.join(transitions['persisting_finding_keys']) or 'None'}",
         "## 5. Attribution Delta",
         f"- Composer hashes: {delta['attribution_delta']['composer_code_hashes_delta']:+d}; human hashes: {delta['attribution_delta']['human_code_hashes_delta']:+d}",
-        f"- Lines: +{delta['attribution_delta']['lines_added_delta']} / -{delta['attribution_delta']['lines_removed_delta']}",
+        f"- Lines: {delta['attribution_delta']['lines_added_delta']:+d} / {delta['attribution_delta']['lines_removed_delta']:+d}",
         "",
     ])
 
