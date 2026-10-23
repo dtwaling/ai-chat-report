@@ -26,6 +26,13 @@ def test_skill_path_requires_skill_markdown_filename() -> None:
     assert not is_skill_path(".cursor/skills/demo/helper.py")
 
 
+def test_source_hooks_file_is_not_customization() -> None:
+    session = _session(_call("file_read", "src/hooks/useAuth.ts"))
+    classify_session(session)
+    assert session.turns[0].tool_calls[0].semantic_class == "native-read"
+    assert session.customizations == []
+
+
 def test_classify_session_is_idempotent_and_tracks_reads(tmp_path: Path) -> None:
     workspace = tmp_path
     skill = workspace / ".cursor" / "skills" / "demo" / "SKILL.md"

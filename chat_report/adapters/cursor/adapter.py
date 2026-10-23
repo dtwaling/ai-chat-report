@@ -56,6 +56,23 @@ def _text(value: Any) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _normalize_session_status(raw_status: Any, turns: list[TurnIR], dispatch_status: str | None = None) -> str:
+    """Normalize Cursor's inconsistent completed-session status values."""
+    status = _text(raw_status).strip().lower()
+    dispatch = (dispatch_status or "").strip().lower()
+    if status in ("aborted", "cancelled", "canceled") or dispatch in ("aborted", "cancelled", "canceled"):
+        return "aborted"
+    if status in ("error", "errored", "failed") or dispatch in ("error", "errored", "failed"):
+        return "errored"
+    if status in ("running", "loading", "in_progress"):
+        return "running"
+    if status in ("completed", "success") or dispatch in ("completed", "success"):
+        return "completed"
+    if status in ("none", "", "unknown") and turns:
+        return "completed"
+    return status or "completed"
+
+
 def _item_path(value: Any) -> str | None:
     if isinstance(value, str) and value:
         return value
@@ -312,7 +329,7 @@ class CursorAdapter:
                 end = max((t.completed_at_ms for t in turns if t.completed_at_ms is not None), default=None)
             session = SessionIR("2.0", self.harness_name, detect_cursor_version(state_con, data), session_id, normalized,
                 _text(data.get("parentComposerId")) or None, bool(data.get("isSubagent")), _text(data.get("subagentTypeName")) or None,
-                _text(data.get("name")) or None, _text(data.get("unifiedMode")) or None, _text(data.get("status")) or None,
+                _text(data.get("name")) or None, _text(data.get("unifiedMode")) or None, _normalize_session_status(data.get("status"), turns),
                 _text((data.get("modelConfig") or {}).get("modelName")) if isinstance(data.get("modelConfig"), dict) else None,
                 bool((data.get("modelConfig") or {}).get("maxMode")) if isinstance(data.get("modelConfig"), dict) and "maxMode" in data.get("modelConfig", {}) else None,
                 _reasoning_effort(data), start, end, end - start if isinstance(start, int) and isinstance(end, int) and end >= start else None,
@@ -359,8 +376,14 @@ class CursorAdapter:
             turn.assistant_texts.append(_text(bubble.get("text")))
         tfd = bubble.get("toolFormerData")
         if isinstance(tfd, dict):
-            turn.tool_calls.append(map_tool_call(tfd, call_index=call_index, turn_index=turn.turn_index, bubble_id=bubble_id,
-                started_at_ms=bubble_timestamps(bubble)[0], completed_at_ms=bubble_timestamps(bubble)[1], denial_markers=markers))
+            call = map_tool_call(tfd, call_index=call_index, turn_index=turn.turn_index, bubble_id=bubble_id,
+                started_at_ms=bubble_timestamps(bubble)[0], completed_at_ms=bubble_timestamps(bubble)[1], denial_markers=markers)
+            additional = tfd.get("additionalData")
+            if isinstance(additional, dict):
+                status = _text(additional.get("status")) or _text(additional.get("terminationReason"))
+                if status:
+                    call.input_params["_dispatch_status"] = status
+            turn.tool_calls.append(call)
 
     def _attach_subagents(self, session: SessionIR, data: dict[str, Any], options: ExtractOptions, visited_ids: set[str]) -> None:
         dispatch: dict[str, int] = {}
@@ -383,8 +406,12 @@ class CursorAdapter:
                 })
                 continue
             reads = [call.target_path for turn in child.turns for call in turn.tool_calls if call.canonical_kind == "file_read" and not call.is_error and call.target_path]
+            dispatch_call = next((call for turn in session.turns for call in turn.tool_calls if call.subagent_session_id == sub_id), None)
+            dispatch_status = None
+            if dispatch_call:
+                dispatch_status = _text(dispatch_call.input_params.get("_dispatch_status")) or None
             session.subagents.append(SubagentSummaryIR(sub_id, dispatch.get(sub_id), child.subagent_type, child.title, child.model_name,
-                child.status, child.duration_ms, len(child.turns), sum(len(t.tool_calls) for t in child.turns),
+                _normalize_session_status(child.status, child.turns, dispatch_status), child.duration_ms, len(child.turns), sum(len(t.tool_calls) for t in child.turns),
                 sum(1 for t in child.turns for c in t.tool_calls if c.is_error), sum(1 for t in child.turns for c in t.tool_calls if c.is_denied),
                 [path for path in reads if _customization_kind(path) == "skill"],
                 [path for path in reads if _customization_kind(path) in ("rule", "agent_doc")]))

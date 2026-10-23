@@ -64,7 +64,16 @@ def _groups(calls: list[ToolCallIR], key_fn, predicate) -> list[list[ToolCallIR]
 def _h01(session: SessionIR, workspace: Path | None, calls: list[ToolCallIR]) -> list[DiagnosticFinding]:
     attached_skill_refs = [ref for ref in session.customizations if ref.kind == "skill" and ref.source == "context_attached"]
     known_skill_refs = [ref for ref in session.customizations if ref.kind == "skill" and ref.source in {"context_attached", "workspace_active"}]
-    read_paths = {canonicalize_path(c.target_path, workspace) for c in calls if c.semantic_class == "skill-read" and not c.is_error}
+    read_paths = {
+        canonicalize_path(call.target_path, workspace)
+        for call in calls
+        if (call.semantic_class == "skill-read" or (call.canonical_kind == "file_read" and is_skill_path(call.target_path))) and not call.is_error
+    }
+    read_paths.update(
+        canonicalize_path(ref.path, workspace)
+        for ref in session.customizations
+        if ref.kind == "skill" and ref.source == "explicit_read"
+    )
     read_paths.update(canonicalize_path(path, workspace) for sub in session.subagents for path in sub.skills_read)
     known_paths = {canonicalize_path(ref.path, workspace) for ref in known_skill_refs}
     for turn in session.turns:
@@ -87,14 +96,24 @@ def _h01(session: SessionIR, workspace: Path | None, calls: list[ToolCallIR]) ->
         relevant_turn = None
         mentioned = False
         for turn in session.turns:
-            cleaned_user_text = re.sub(r"<available_skills>.*?</available_skills>", "", turn.user_text, flags=re.S | re.I)
+            cleaned_user_text = re.sub(r"<available_skills\b[^>]*>.*?</available_skills>", "", turn.user_text, flags=re.S | re.I)
             manual_attached = bool(re.search(r"<manually_attached_skills>.*?" + re.escape(slug) + r".*?</manually_attached_skills>", turn.user_text, re.S | re.I))
             prose = {match.lower() for match in re.findall(r"\b(?:use|follow|read|activate)\s+(?:the\s+)?([a-z0-9_-]{3,40})\s+skill\b", cleaned_user_text, re.I)}
-            direct = bool(re.search(rf"(?<![\w-])/{re.escape(slug)}\b|(?<![\w-]){re.escape(slug)}(?![\w-])", cleaned_user_text, re.I))
+            direct = bool(re.search(r"(?<![\w/])/" + re.escape(slug) + r"\b", cleaned_user_text, re.I))
             if manual_attached or direct or slug in prose:
                 mentioned, relevant_turn = True, turn
                 break
-            if any(slug in {match.lower() for match in re.findall(r"\b(?:skill|SKILL\.md)\s+[`'\"]?([a-z0-9_-]{3,40})[`'\"]?", thinking.text, re.I)} for thinking in turn.thinking_blocks):
+            if any(
+                slug in {
+                    match.lower()
+                    for pattern in (
+                        r"\b(?:skill|SKILL\.md)\s+[`'\"]?([a-z0-9_-]{3,40})[`'\"]?",
+                        r"\b(?:use|follow|read|activate)\s+(?:the\s+)?[`'\"]?([a-z0-9_-]{3,40})[`'\"]?\s+skill\b",
+                    )
+                    for match in re.findall(pattern, thinking.text, re.I)
+                }
+                for thinking in turn.thinking_blocks
+            ):
                 mentioned, relevant_turn = True, turn
                 break
         tokens = [x for x in re.split(r"[-_]+", slug) if len(x) >= 4 and x not in {"skill", "cursor", "agent", "tool", "core", "plugin", "workflow", "report", "chat"}]

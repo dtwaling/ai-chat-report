@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+from chat_report.core.classifier import classify_session
+from chat_report.core.compare import build_diff_report
 from chat_report.core.diagnostics import evaluate_diagnostics
 from chat_report.core.ir import CustomizationRefIR, HEURISTIC_IDS, SessionIR, SubagentSummaryIR, ThinkingIR, TokenBreakdownIR, ToolCallIR, TurnIR
 
@@ -36,6 +40,23 @@ def test_h01_attached_mentioned_domain_and_catalog_controls() -> None:
     assert not any(f.id == HEURISTIC_IDS[0] for f in evaluate_diagnostics(satisfied))
 
 
+def test_h01_ignores_available_catalog_attributes_and_bare_english_word() -> None:
+    loop = CustomizationRefIR("skill", "/skills/loop/SKILL.md", "workspace_active")
+    session = _session([], texts={1: '<available_skills description="catalog"><agent_skill fullPath="/skills/loop/SKILL.md"/></available_skills> Please fix the retry loop.'}, customizations=[loop])
+    assert not any(f.id == HEURISTIC_IDS[0] for f in evaluate_diagnostics(session))
+
+
+def test_h01_read_remains_satisfied_without_workspace(tmp_path: Path) -> None:
+    workspace = tmp_path
+    skill = workspace / ".cursor" / "skills" / "canvas" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("x")
+    session = _session([_call(1, "file_read", path=str(skill))], texts={1: "use canvas skill"}, customizations=[CustomizationRefIR("skill", str(skill), "context_attached")])
+    classify_session(session, workspace)
+    assert not any(f.id == HEURISTIC_IDS[0] for f in evaluate_diagnostics(session))
+    assert not any(f["id"] == HEURISTIC_IDS[0] for f in build_diff_report(session, session)["before"]["diagnostics"]["findings"])
+
+
 def test_h02_discovery_filters_and_h03_empty_search() -> None:
     discovered = _call(1, "mcp_discovery", namespace="x", tool="one")
     called = _call(2, "mcp_call", namespace="x", tool="two")
@@ -44,6 +65,7 @@ def test_h02_discovery_filters_and_h03_empty_search() -> None:
     assert any(f.id == HEURISTIC_IDS[1] for f in evaluate_diagnostics(_session([cancelled, called])))
     empty = [_call(i, "search_grep", params={"pattern": "x"}, output="No matches found", output_len=16) for i in range(1, 4)]
     assert any(f.evidence.get("branch") == "4b" for f in evaluate_diagnostics(_session(empty)))
+    assert [f.finding_key for f in evaluate_diagnostics(_session(empty))] == [f.finding_key for f in evaluate_diagnostics(_session(empty))]
 
 
 def test_failure_thrash_requires_three_calls() -> None:
@@ -91,6 +113,7 @@ def test_h07_child_and_sequential_waves() -> None:
     assert not any(f.finding_key.endswith(":turn:1") for f in evaluate_diagnostics(_session(parallel)))
     overlapping = [_call(i, "subagent_dispatch", started=i, ended=20) for i in range(1, 4)]
     assert not any(f.finding_key.endswith(":turn:1") for f in evaluate_diagnostics(_session(overlapping)))
+    assert [f.finding_key for f in findings] == [f.finding_key for f in evaluate_diagnostics(_session([dispatch, *wave], subagents=[child]))]
 
 
 def test_finding_keys_are_stable_for_all_heuristics() -> None:

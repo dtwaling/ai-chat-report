@@ -29,3 +29,13 @@ def test_aggregate_rollup_sums_session_counts() -> None:
     assert report["rollup"]["total_tool_calls"] == 2
     assert report["rollup"]["status_counts"] == {"completed": 1, "error": 1, "denied": 0, "cancelled": 0, "loading": 0}
     assert report["rollup"]["diagnostics_rollup"]["by_severity"] == {"high": 0, "medium": 0, "low": 0, "info": 0}
+
+
+def test_reports_preserve_deduplicated_session_warnings() -> None:
+    before, after = _session("before"), _session("after")
+    warning = {"code": "test-warning", "message": "kept"}
+    before.warnings = [warning]
+    after.warnings = [warning, {"code": "second", "message": "also kept"}]
+    assert build_single_session_report(before)["warnings"] == [warning]
+    assert build_diff_report(before, after)["warnings"] == [warning, {"code": "second", "message": "also kept"}]
+    assert build_aggregate_report([before, after])["warnings"] == [warning, {"code": "second", "message": "also kept"}]

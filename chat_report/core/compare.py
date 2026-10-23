@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from dataclasses import asdict
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Iterable
 
 from chat_report.core.diagnostics import evaluate_diagnostics
@@ -25,7 +26,8 @@ def build_session_aggregates(session: SessionIR) -> dict[str, Any]:
     status = {value: 0 for value in TOOL_CALL_STATUSES}
     semantic, kinds, namespaces = Counter(), Counter(), Counter()
     for call in calls:
-        status[call.status] = status.get(call.status, 0) + 1
+        normalized_status = call.status if call.status in TOOL_CALL_STATUSES else ("error" if call.is_error else "completed")
+        status[normalized_status] += 1
         semantic[call.semantic_class] += 1
         kinds[call.canonical_kind] += 1
         if call.canonical_kind == "mcp_call" and call.mcp_namespace:
@@ -60,17 +62,17 @@ def build_session_aggregates(session: SessionIR) -> dict[str, Any]:
     }
 
 
-def _single(session: SessionIR, diagnostics: list[DiagnosticFinding] | None = None) -> dict[str, Any]:
-    findings = diagnostics if diagnostics is not None else evaluate_diagnostics(session)
+def _single(session: SessionIR, diagnostics: list[DiagnosticFinding] | None = None, workspace: Path | None = None) -> dict[str, Any]:
+    findings = diagnostics if diagnostics is not None else evaluate_diagnostics(session, workspace=workspace)
     severity = {key: 0 for key in ("high", "medium", "low", "info")}
     for finding in findings:
         severity[finding.severity] += 1
     return {"session": session, "aggregates": build_session_aggregates(session), "diagnostics": {"total_findings": len(findings), "by_severity": severity, "findings": findings}}
 
 
-def build_single_session_report(session: SessionIR, *, diagnostics: list[DiagnosticFinding] | None = None) -> dict[str, Any]:
+def build_single_session_report(session: SessionIR, *, diagnostics: list[DiagnosticFinding] | None = None, workspace: Path | None = None) -> dict[str, Any]:
     """Build the serialized single-session report embedded by diff reports."""
-    single = _single(session, diagnostics)
+    single = _single(session, diagnostics, workspace)
     session_data = asdict(session)
     session_data.pop("turns")
     session_data.pop("warnings")
@@ -104,18 +106,23 @@ def _session_summary(single: dict[str, Any]) -> dict[str, Any]:
 def _envelope(kind: str, sessions: Iterable[SessionIR]) -> dict[str, Any]:
     values = list(sessions)
     harnesses, versions = {s.harness for s in values}, {s.harness_version for s in values}
-    return {"schema_version": "2.0", "report_kind": kind, "generated_at_iso": datetime.now(timezone.utc).isoformat(), "harness": next(iter(harnesses)) if len(harnesses) == 1 else "mixed", "harness_version": next(iter(versions)) if len(versions) == 1 else "mixed", "warnings": []}
+    warnings: list[dict[str, str]] = []
+    for session in values:
+        for warning in session.warnings:
+            if warning not in warnings:
+                warnings.append(warning)
+    return {"schema_version": "2.0", "report_kind": kind, "generated_at_iso": datetime.now(timezone.utc).isoformat(), "harness": next(iter(harnesses)) if len(harnesses) == 1 else "mixed", "harness_version": next(iter(versions)) if len(versions) == 1 else "mixed", "warnings": warnings}
 
 
-def build_diff_report(before_session: SessionIR, after_session: SessionIR, *, before_diagnostics: list[DiagnosticFinding] | None = None, after_diagnostics: list[DiagnosticFinding] | None = None) -> dict[str, Any]:
+def build_diff_report(before_session: SessionIR, after_session: SessionIR, *, before_diagnostics: list[DiagnosticFinding] | None = None, after_diagnostics: list[DiagnosticFinding] | None = None, workspace: Path | None = None) -> dict[str, Any]:
     """Build a v2 diff report from two sessions."""
-    before, after = _single(before_session, before_diagnostics), _single(after_session, after_diagnostics)
+    before, after = _single(before_session, before_diagnostics, workspace), _single(after_session, after_diagnostics, workspace)
     ba, aa = before["aggregates"], after["aggregates"]
     bf, af = before["diagnostics"]["findings"], after["diagnostics"]["findings"]
     before_keys, after_keys = {x.finding_key for x in bf}, {x.finding_key for x in af}
     before_ids, after_ids = {x.id for x in bf}, {x.id for x in af}
     report = _envelope("diff", [before_session, after_session])
-    report.update({"before": build_single_session_report(before_session, diagnostics=bf), "after": build_single_session_report(after_session, diagnostics=af), "delta": {
+    report.update({"before": build_single_session_report(before_session, diagnostics=bf, workspace=workspace), "after": build_single_session_report(after_session, diagnostics=af, workspace=workspace), "delta": {
         "turn_count_delta": aa["turn_count"] - ba["turn_count"], "thinking_block_count_delta": aa["thinking_block_count"] - ba["thinking_block_count"],
         "tool_calls_total_delta": aa["tool_calls_total"] - ba["tool_calls_total"], "error_count_delta": aa["status_counts"]["error"] - ba["status_counts"]["error"],
         "denial_count_delta": aa["status_counts"]["denied"] - ba["status_counts"]["denied"],
@@ -132,9 +139,9 @@ def build_diff_report(before_session: SessionIR, after_session: SessionIR, *, be
     return report
 
 
-def build_aggregate_report(sessions: list[SessionIR], *, diagnostics_by_session: dict[str, list[DiagnosticFinding]] | None = None) -> dict[str, Any]:
+def build_aggregate_report(sessions: list[SessionIR], *, diagnostics_by_session: dict[str, list[DiagnosticFinding]] | None = None, workspace: Path | None = None) -> dict[str, Any]:
     """Build a cohort rollup preserving per-session summary data."""
-    singles = [_single(session, (diagnostics_by_session or {}).get(session.session_id)) for session in sessions]
+    singles = [_single(session, (diagnostics_by_session or {}).get(session.session_id), workspace) for session in sessions]
     report = _envelope("aggregate", sessions)
     rollup: dict[str, Any] = {"total_turns": 0, "total_thinking_blocks": 0, "total_tool_calls": 0, "tool_calls_by_semantic_class": Counter(), "tool_calls_by_canonical_kind": Counter(), "mcp_calls_by_namespace": Counter(), "status_counts": {key: 0 for key in TOOL_CALL_STATUSES}, "diagnostics_rollup": {"total_findings": 0, "by_severity": {key: 0 for key in ("high", "medium", "low", "info")}, "by_heuristic_id": defaultdict(lambda: {"count": 0, "session_ids": []})}, "customization_rollup": {"skills_read_frequency": Counter(), "rules_read_frequency": Counter(), "total_subagents_spawned": 0}, "attribution_totals": {"composer_code_hashes_count": 0, "human_code_hashes_count": 0, "total_lines_added": 0, "total_lines_removed": 0, "scored_commit_count": 0}}
     for single in singles:

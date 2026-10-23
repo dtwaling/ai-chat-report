@@ -208,3 +208,20 @@ def test_subagent_parent_linkage_and_cycles_are_safe(tmp_path):
     session = CursorAdapter().extract_session(session_id, ExtractOptions(state_db=state, tracking_db=tracking))
     parent_turns = {child.session_id: child.parent_turn_index for child in session.subagents}
     assert parent_turns == {"child-dispatched": 1, "child-composer-only": None}
+
+
+def test_subagent_none_status_normalizes_to_completed(tmp_path):
+    session_id = "0a7d3243-61b6-4b3a-8fc5-43c73e2db583"
+    state = create_synthetic_state_db(tmp_path / "state.vscdb", session_id=session_id, bubble_count=2)
+    tracking = create_synthetic_tracking_db(tmp_path / "tracking.db", session_id=session_id)
+    con = sqlite3.connect(state)
+    parent = json.loads(con.execute("SELECT value FROM cursorDiskKV WHERE key = ?", (f"composerData:{session_id}",)).fetchone()[0])
+    parent["subagentComposerIds"] = ["child"]
+    con.execute("UPDATE cursorDiskKV SET value = ? WHERE key = ?", (json.dumps(parent), f"composerData:{session_id}"))
+    con.execute("INSERT INTO cursorDiskKV VALUES (?, ?)", (f"composerData:child", json.dumps({"name": "child", "createdAt": 1, "lastUpdatedAt": 2, "status": "none", "isSubagent": True, "parentComposerId": session_id})))
+    con.execute("INSERT INTO cursorDiskKV VALUES (?, ?)", ("bubbleId:child:user", json.dumps({"type": 1, "text": "child"})))
+    con.execute("INSERT INTO cursorDiskKV VALUES (?, ?)", ("composerConvHeaders:child:000000", json.dumps([{"bubbleId": "user", "type": 1}])))
+    con.commit()
+    con.close()
+    session = CursorAdapter().extract_session(session_id, ExtractOptions(state_db=state, tracking_db=tracking))
+    assert session.subagents[0].status == "completed"

@@ -53,7 +53,8 @@ def is_rule_path(path: str | None) -> bool:
 
 def is_hook_path(path: str | None) -> bool:
     value = (path or "").replace("\\", "/").lower()
-    return value.endswith("hooks.json") or "/hooks/" in value
+    name = value.rsplit("/", 1)[-1]
+    return name == "hooks.json" or "/.cursor/hooks/" in value or value.startswith(".cursor/hooks/")
 
 
 def _customization_kind(path: str) -> str | None:
@@ -99,7 +100,7 @@ def _workspace_customizations(workspace: Path) -> list[CustomizationRefIR]:
     candidates: list[tuple[str, str]] = []
     cursor = workspace / ".cursor"
     if cursor.is_dir():
-        candidates.extend(("skill", str(p)) for p in cursor.glob("skills/**/SKILL.md"))
+        candidates.extend(("skill", str(p)) for p in cursor.glob("skills/*/SKILL.md"))
         candidates.extend(("rule", str(p)) for p in cursor.glob("rules/*.mdc"))
         hooks = cursor / "hooks.json"
         if hooks.is_file():
