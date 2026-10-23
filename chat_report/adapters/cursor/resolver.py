@@ -77,8 +77,10 @@ def _lookup_request_id_in_tracking(track_con: sqlite3.Connection, raw_id: str) -
 def _scan_bubbles_for_request_id(state_con: sqlite3.Connection, raw_id: str) -> str | None:
     try:
         rows = state_con.execute(
-            "SELECT key, value FROM cursorDiskKV WHERE key LIKE 'bubbleId:%' AND value IS NOT NULL"
-        ).fetchall()
+            "SELECT key, value FROM cursorDiskKV "
+            "WHERE key LIKE 'bubbleId:%' AND value IS NOT NULL AND CAST(value AS TEXT) LIKE ?",
+            (f"%{raw_id}%",),
+        )
         for key_val, blob_val in rows:
             key = str(key_val)
             parts = key.split(":")

@@ -16,6 +16,7 @@ FALLBACK_DENIAL_MARKERS: tuple[str, ...] = (
     '"permissionDecision": "deny"',
     "Auto-review blocked",
     "rejected by user",
+    "blocked by a hook",
 )
 
 CONTEXT_DENIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -72,8 +73,38 @@ def strip_jsonc_comments(text: str) -> str:
         i += 1
 
     cleaned = "".join(out)
-    # Also strip trailing commas before } or ]
-    return re.sub(r",\s*([}\]])", r"\1", cleaned)
+    out = []
+    i = 0
+    in_str = False
+    quote_char = ""
+    while i < len(cleaned):
+        ch = cleaned[i]
+        if in_str:
+            out.append(ch)
+            if ch == "\\" and i + 1 < len(cleaned):
+                out.append(cleaned[i + 1])
+                i += 2
+                continue
+            if ch == quote_char:
+                in_str = False
+            i += 1
+            continue
+        if ch in ('"', "'"):
+            in_str = True
+            quote_char = ch
+            out.append(ch)
+            i += 1
+            continue
+        if ch == ",":
+            j = i + 1
+            while j < len(cleaned) and cleaned[j].isspace():
+                j += 1
+            if j < len(cleaned) and cleaned[j] in "}]":
+                i += 1
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def extract_hook_script_token(command: str) -> str | None:

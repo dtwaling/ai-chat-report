@@ -218,7 +218,6 @@ def map_tool_call(
         params["_discovered_tools"] = _discovered_tools(result_raw, params)
     target = _first_str(params, ("relativeWorkspacePath", "targetFile", "path", "effectiveUri", "targetDirectory"))
     result_text = _error_text(unwrapped_result)
-    is_denied, denial_reason = detect_denial(result_text, denial_markers) if denial_markers else detect_denial(result_text)
     raw_status = str(tfd.get("status") or "").lower()
     error_value = tfd.get("error")
     has_nonzero_exit = isinstance(unwrapped_result, dict) and unwrapped_result.get("exitCode") not in (None, 0)
@@ -228,6 +227,32 @@ def map_tool_call(
     error_prefix = isinstance(unwrapped_result, str) and result_text.lstrip()[:80].lower().startswith(
         ('{"error"', '{"iserror":true', "error:")
     )
+    explicit_rejected = unwrapped_result.get("rejected") if isinstance(unwrapped_result, dict) else None
+    is_completed_file_read = (
+        kind is CanonicalToolKind.FILE_READ
+        and raw_status in ("completed", "")
+        and not error_value
+        and not has_result_error
+        and isinstance(unwrapped_result, dict)
+        and "contents" in unwrapped_result
+    )
+    denial_eligible = (
+        raw_status in ("error", "failed")
+        or bool(error_value)
+        or has_nonzero_exit
+        or has_result_error
+        or error_prefix
+        or len(result_text) <= 400
+    )
+    if explicit_rejected is True:
+        is_denied, denial_reason = True, (
+            _first_str(unwrapped_result, ("output", "error", "message")) or "rejected"
+        )[:160]
+    elif is_completed_file_read or not denial_eligible or (explicit_rejected is False and len(result_text) > 400):
+        is_denied, denial_reason = False, None
+    else:
+        scan_text = result_text[:400] if len(result_text) > 400 and raw_status in ("completed", "") else result_text
+        is_denied, denial_reason = detect_denial(scan_text, denial_markers) if denial_markers else detect_denial(scan_text)
     if is_denied or str(tfd.get("userDecision") or "").lower() == "rejected":
         status, is_error, error_message = "denied", True, denial_reason or "rejected by user"
     elif raw_status in ("cancelled", "canceled", "aborted"):

@@ -105,3 +105,25 @@ def test_null_result_error_is_completed(result):
     call = map_tool_call({"name": "read_file", "result": result},
         call_index=1, turn_index=1, bubble_id="b")
     assert (call.status, call.is_error) == ("completed", False)
+
+
+def test_large_successful_command_quoting_denial_marker_is_not_denied():
+    call = map_tool_call({
+        "name": "run_terminal_command_v2",
+        "status": "completed",
+        "result": {"exitCode": 0, "output": "x" * 500 + " Auto-review blocked " + "y" * 500},
+    }, call_index=1, turn_index=1, bubble_id="b")
+    assert (call.status, call.is_denied, call.is_error) == ("completed", False, False)
+
+
+def test_explicit_hook_rejection_and_large_non_rejection():
+    rejected = map_tool_call({
+        "name": "run_terminal_command_v2",
+        "result": {"rejected": True, "output": "Rejected: Command execution was blocked by a hook: policy"},
+    }, call_index=1, turn_index=1, bubble_id="b")
+    assert (rejected.status, rejected.is_denied) == ("denied", True)
+    not_rejected = map_tool_call({
+        "name": "run_terminal_command_v2",
+        "result": {"rejected": False, "exitCode": 1, "output": "x" * 500 + "Blocked by preToolUse hook"},
+    }, call_index=2, turn_index=1, bubble_id="b")
+    assert (not_rejected.status, not_rejected.is_denied) == ("error", False)

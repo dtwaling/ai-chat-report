@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -74,6 +75,20 @@ def _append_unique(target: list[str], values: list[str]) -> None:
     target.extend(value for value in values if value not in target)
 
 
+def _customization_kind(path: str) -> str | None:
+    normalized = path.replace("\\", "/").lower()
+    name = Path(path).name.lower()
+    if Path(normalized).name == "skill.md":
+        return "skill"
+    if name in ("agents.md", "claude.md"):
+        return "agent_doc"
+    if normalized.endswith((".mdc", ".cursorrules")) or "/.cursor/rules/" in normalized:
+        return "rule"
+    if name == "hooks.json" or "/.cursor/hooks/" in normalized:
+        return "hook"
+    return None
+
+
 def _reasoning_effort(data: dict[str, Any]) -> str | None:
     config = data.get("modelConfig")
     if isinstance(config, dict):
@@ -100,19 +115,28 @@ def _context_refs(bubble: dict[str, Any], turn_index: int) -> list[Customization
     refs: list[CustomizationRefIR] = []
     context = bubble.get("context")
     if isinstance(context, dict):
-        for key, kind in (("cursorRules", "rule"), ("mentions", "agent_doc"), ("fileSelections", "agent_doc")):
+        for key in ("cursorRules",):
             values = context.get(key)
             for path in _paths(values):
-                refs.append(CustomizationRefIR(kind, path, "context_attached", turn_index))
+                refs.append(CustomizationRefIR(_customization_kind(path) or "rule", path, "context_attached", turn_index))
+        for key in ("mentions", "fileSelections"):
+            for path in _paths(context.get(key)):
+                kind = _customization_kind(path)
+                if kind is not None:
+                    refs.append(CustomizationRefIR(kind, path, "context_attached", turn_index))
     chunks = bubble.get("attachedCodeChunks")
     if isinstance(chunks, list):
         for path in _paths(chunks):
-            refs.append(CustomizationRefIR("agent_doc", path, "context_attached", turn_index))
+            kind = _customization_kind(path)
+            if kind is not None:
+                refs.append(CustomizationRefIR(kind, path, "context_attached", turn_index))
     request_context = bubble.get("messageRequestContext")
     if isinstance(request_context, dict):
-        for key, kind in (("rules", "rule"), ("files", "agent_doc")):
-            values = request_context.get(key)
-            for path in _paths(values):
+        for path in _paths(request_context.get("rules")):
+            refs.append(CustomizationRefIR(_customization_kind(path) or "rule", path, "context_attached", turn_index))
+        for path in _paths(request_context.get("files")):
+            kind = _customization_kind(path)
+            if kind is not None:
                 refs.append(CustomizationRefIR(kind, path, "context_attached", turn_index))
     text = _text(bubble.get("text"))
     in_manual = False
@@ -312,9 +336,12 @@ class CursorAdapter:
                 track_con = open_ro(tracking_path)
                 window = (start, end) if isinstance(start, int) and isinstance(end, int) and end >= start else None
                 session.attribution = fetch_attribution(track_con, session_id, window, warnings)
-            except StoreAccessError:
+            except (StoreAccessError, sqlite3.Error) as exc:
                 if explicit_tracking:
-                    raise
+                    if isinstance(exc, StoreAccessError):
+                        raise
+                    raise StoreAccessError(f"Cannot read Cursor tracking database: {tracking_path}") from exc
+                session.attribution = None
                 warnings.append({"code": "cursor-tracking-db-unavailable", "message": "Default ai-code-tracking.db is unavailable."})
             if options.include_subagents:
                 self._attach_subagents(session, data, options, visited_ids)
@@ -350,12 +377,17 @@ class CursorAdapter:
             try:
                 child = self._extract(sub_id, child_options, None, visited_ids)
             except (StoreAccessError, LookupError):
+                session.warnings.append({
+                    "code": "cursor-subagent-extract-failed",
+                    "message": f"Failed to extract child subagent '{sub_id}'.",
+                })
                 continue
             reads = [call.target_path for turn in child.turns for call in turn.tool_calls if call.canonical_kind == "file_read" and not call.is_error and call.target_path]
             session.subagents.append(SubagentSummaryIR(sub_id, dispatch.get(sub_id), child.subagent_type, child.title, child.model_name,
                 child.status, child.duration_ms, len(child.turns), sum(len(t.tool_calls) for t in child.turns),
                 sum(1 for t in child.turns for c in t.tool_calls if c.is_error), sum(1 for t in child.turns for c in t.tool_calls if c.is_denied),
-                [path for path in reads if path.endswith("SKILL.md")], [path for path in reads if path.endswith((".mdc", ".cursorrules", "AGENTS.md", "CLAUDE.md"))]))
+                [path for path in reads if _customization_kind(path) == "skill"],
+                [path for path in reads if _customization_kind(path) in ("rule", "agent_doc")]))
 
 
 register_adapter("cursor", CursorAdapter)

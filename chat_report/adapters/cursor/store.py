@@ -17,9 +17,14 @@ def open_ro(path: Path) -> sqlite3.Connection:
     db_path = Path(path)
     if not db_path.is_file():
         raise StoreAccessError(f"Cursor database is missing or unreadable: {db_path}")
+    con: sqlite3.Connection | None = None
     try:
-        return sqlite3.connect(f"file:{db_path.resolve().as_posix()}?mode=ro", uri=True)
+        con = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+        con.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+        return con
     except sqlite3.Error as exc:
+        if con is not None:
+            con.close()
         raise StoreAccessError(f"Cannot open Cursor database read-only: {db_path}") from exc
 
 

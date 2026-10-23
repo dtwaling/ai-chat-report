@@ -4,6 +4,7 @@ import sqlite3
 import pytest
 
 from chat_report.adapters.cursor.adapter import CursorAdapter
+from chat_report.adapters.cursor import adapter as adapter_module
 from chat_report.adapters.cursor.store import (
     fetch_attribution,
     fetch_offloaded_content,
@@ -11,6 +12,7 @@ from chat_report.adapters.cursor.store import (
     order_bubbles,
 )
 from chat_report.core.adapter import ExtractOptions, StoreAccessError
+from chat_report.core.ir import ResolvedTarget
 from tests._fixtures import (
     create_legacy_early_state_db,
     create_legacy_mid_state_db,
@@ -59,6 +61,31 @@ def test_open_ro_and_extract_v18_session(tmp_path):
         open_ro(tmp_path / "missing.db")
 
 
+def test_extract_session_preserves_resolved_target_provenance(tmp_path):
+    state = create_synthetic_state_db(tmp_path / "state.vscdb")
+    tracking = create_synthetic_tracking_db(tmp_path / "tracking.db")
+    target = ResolvedTarget("0a7d3243-61b6-4b3a-8fc5-43c73e2db583", "request-0", "request-id")
+    session = CursorAdapter().extract_session(target.session_id, ExtractOptions(state_db=state, tracking_db=tracking), resolved_from=target)
+    assert session.resolved_from == {"session_id": target.session_id, "input_id": "request-0", "source": "request-id"}
+
+
+def test_tracking_database_override_and_default_failure_handling(tmp_path, monkeypatch):
+    state = create_synthetic_state_db(tmp_path / "state.vscdb")
+    missing = tmp_path / "missing-tracking.db"
+    with pytest.raises(StoreAccessError):
+        CursorAdapter().extract_session("0a7d3243-61b6-4b3a-8fc5-43c73e2db583",
+            ExtractOptions(state_db=state, tracking_db=missing))
+    corrupt = tmp_path / "corrupt-tracking.db"
+    corrupt.write_text("not sqlite", encoding="utf-8")
+    with pytest.raises(StoreAccessError):
+        CursorAdapter().extract_session("0a7d3243-61b6-4b3a-8fc5-43c73e2db583",
+            ExtractOptions(state_db=state, tracking_db=corrupt))
+    monkeypatch.setattr(adapter_module, "resolve_tracking_db_with_provenance", lambda _: (missing, False))
+    session = CursorAdapter().extract_session("0a7d3243-61b6-4b3a-8fc5-43c73e2db583", ExtractOptions(state_db=state))
+    assert session.attribution is None
+    assert "cursor-tracking-db-unavailable" in {warning["code"] for warning in session.warnings}
+
+
 def test_order_bubbles_filters_orphans_and_falls_back_to_timestamp():
     bubbles = {"a": {"startedAtMs": 20}, "b": {"startedAtMs": 10}}
     ordered, count, warnings = order_bubbles([{"bubbleId": "a"}], bubbles)
@@ -97,7 +124,9 @@ def test_legacy_mid_context_and_orphan_filtering(tmp_path):
     session = CursorAdapter().extract_session("0a7d3243-61b6-4b3a-8fc5-43c73e2db583",
         ExtractOptions(state_db=state, tracking_db=tracking))
     assert session.orphan_bubble_count == 1
-    assert {ref.path for ref in session.customizations} >= {".cursor/rules/legacy.mdc", "src/legacy.py"}
+    assert ".cursor/rules/legacy.mdc" in {ref.path for ref in session.customizations}
+    assert ".cursor/rules/legacy.mdc" in session.turns[0].attached_rules
+    assert "src/legacy.py" in session.turns[0].attached_files
     assert all("orphan" not in text for turn in session.turns for text in turn.assistant_texts)
 
 

@@ -24,6 +24,10 @@ def test_strip_jsonc_comments_preserves_string_content():
     }
 
 
+def test_strip_jsonc_comments_preserves_comma_bracket_inside_string():
+    assert json.loads(strip_jsonc_comments('{"message": ", ]",}')) == {"message": ", ]"}
+
+
 def test_extract_hook_script_token_supports_python_and_javascript():
     assert extract_hook_script_token('python ".cursor/hooks/guard.py" --check') == (
         ".cursor/hooks/guard.py"

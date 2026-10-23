@@ -31,7 +31,7 @@ def create_synthetic_state_db(
         isArchived INTEGER, isSubagent INTEGER, recency INTEGER, checkpointAt INTEGER,
         value TEXT, subagentTypeName TEXT)""")
     data = {
-        "composerId": session_id, "name": "Synthetic session", "createdAt": 1000,
+        "composerId": session_id, "name": "Synthetic session", "cursorVersion": "3.26.16", "createdAt": 1000,
         "lastUpdatedAt": 1000 + bubble_count * 100, "unifiedMode": "agent", "status": "completed",
         "modelConfig": {"modelName": "test-model", "maxMode": True},
         "contextTokensUsed": 100, "contextTokenLimit": 1000, "contextUsagePercent": 10.0,
@@ -62,6 +62,10 @@ def create_synthetic_state_db(
         else:
             bubble["toolFormerData"] = {"name": "read_file_v2", "toolCallId": f"tool-{index}", "modelCallId": "model-1",
                 "status": "completed", "params": {"targetFile": "src/example.py"}, "result": {"content": "ok"}}
+            if index == 1:
+                bubble["toolFormerData"] = {"name": "edit_file_v2", "toolCallId": f"tool-{index}", "modelCallId": "model-1",
+                    "status": "completed", "params": {"relativeWorkspacePath": "src/example.py"},
+                    "result": {"beforeContentId": "composer.content.deadbeef"}}
         con.execute("INSERT INTO cursorDiskKV VALUES (?, ?)", (f"bubbleId:{session_id}:{bubble_id}", json.dumps(bubble)))
         headers.append({"bubbleId": bubble_id, "type": bubble["type"]})
     con.execute("INSERT INTO cursorDiskKV VALUES (?, ?)", (f"composerConvHeaders:{session_id}:000000", json.dumps(headers)))
@@ -135,7 +139,7 @@ def select_live_smoke_session(adapter: HarnessAdapter, opts: ExtractOptions) -> 
     fallback = None
     for entry in entries:
         ir = adapter.extract_session(entry.session_id, opts)
-        if len(ir.turns) >= 1:
+        if len(ir.turns) >= 1 and fallback is None:
             fallback = ir
             if ir.status == "completed" and any(turn.user_bubble_id != "__synthetic_turn_1__" for turn in ir.turns):
                 return ir

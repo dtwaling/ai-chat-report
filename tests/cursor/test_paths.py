@@ -1,6 +1,10 @@
 import json
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 from chat_report.adapters.cursor import paths
 
@@ -60,3 +64,19 @@ def test_detect_cursor_version_uses_documented_precedence(monkeypatch, tmp_path)
     monkeypatch.delenv("CURSOR_PRODUCT_JSON", raising=False)
     monkeypatch.setattr(paths, "_os_product_json_candidates", lambda: [])
     assert paths.detect_cursor_version(con, {}, product_json_path=product_json) == "unknown"
+
+
+def test_adapter_registry_and_side_effect_free_package_import():
+    subprocess.run([
+        sys.executable,
+        "-c",
+        "import sys, chat_report; "
+        "assert chat_report.__version__ == '2.0.0'; "
+        "assert 'chat_report.adapters.cursor.adapter' not in sys.modules; "
+        "import chat_report.adapters; "
+        "from chat_report.core.adapter import get_adapter, register_adapter; "
+        "assert get_adapter('cursor').harness_name == 'cursor'; "
+        "register_adapter('test', lambda: object()); "
+        "assert get_adapter('test') is not None; "
+        "exec(\"try:\\n get_adapter('missing')\\nexcept ValueError:\\n pass\\nelse:\\n raise AssertionError('unknown harness accepted')\")",
+    ], check=True, cwd=Path(__file__).resolve().parents[2])

@@ -144,3 +144,12 @@ def test_headers_remain_authoritative_when_only_subagents_are_indexed(tmp_path):
     assert list_recent_sessions(state_con, list_include_subagents=False) == []
     with pytest.raises(SessionNotFoundError):
         resolve_latest_session_id(state_con)
+
+
+def test_headers_without_is_subagent_use_composer_data_fallback():
+    state_con = _state_connection()
+    state_con.execute("CREATE TABLE composerHeaders (composerId TEXT, recency INTEGER)")
+    _put_composer_data(state_con, "main")
+    _put_composer_data(state_con, "child", isSubagent=True, parentComposerId="main")
+    state_con.executemany("INSERT INTO composerHeaders VALUES (?, ?)", [("main", 1), ("child", 2)])
+    assert [entry.session_id for entry in list_recent_sessions(state_con)] == ["main"]
