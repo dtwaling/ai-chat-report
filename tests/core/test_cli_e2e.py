@@ -61,10 +61,27 @@ def test_all_modes_and_cli_restrictions(tmp_path: Path, capsys: pytest.CaptureFi
     assert digest_error.value.code == 2
 
 
-def test_deprecated_argument_strip() -> None:
+def test_deprecated_argument_strip(tmp_path: Path) -> None:
     cleaned, changed = strip_deprecated_v1_argv(["--shape", "wide", "--tools=all", "--latest"])
     assert changed
     assert cleaned == ["--latest"]
+    res = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).parents[2] / "cursor" / "chat-report.py"),
+            "--shape",
+            "locked",
+            "--tools=all",
+            "--latest",
+            *_args(tmp_path),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "deprecated-v1-flag" in res.stderr
+    assert main(["--validate", str(tmp_path / "out" / f"{DEFAULT_SESSION_ID}.json")]) == 0
 
 
 def test_skill_declares_two_stage_dispatch_contract() -> None:
