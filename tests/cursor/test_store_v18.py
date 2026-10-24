@@ -396,3 +396,66 @@ def test_latest_chat_generation_uuid_populates_last_turn_missing_request_id(tmp_
     assert session.turns[-1].request_id == "d48e54ae-7761-4aa1-bae2-94598a62cfef"
 
 
+def test_resumed_subagent_uses_latest_dispatch_status_and_preserves_type(tmp_path):
+    session_id = "0a7d3243-61b6-4b3a-8fc5-43c73e2db583"
+    state = create_synthetic_state_db(tmp_path / "state.vscdb", session_id=session_id, bubble_count=2)
+    tracking = create_synthetic_tracking_db(tmp_path / "tracking.db", session_id=session_id)
+    con = sqlite3.connect(state)
+    parent = json.loads(con.execute("SELECT value FROM cursorDiskKV WHERE key = ?", (f"composerData:{session_id}",)).fetchone()[0])
+    parent["subagentComposerIds"] = ["child-resumed"]
+    con.execute("UPDATE cursorDiskKV SET value = ? WHERE key = ?", (json.dumps(parent), f"composerData:{session_id}"))
+    first_key = f"bubbleId:{session_id}:bubble-001"
+    first = json.loads(con.execute("SELECT value FROM cursorDiskKV WHERE key = ?", (first_key,)).fetchone()[0])
+    first["toolFormerData"] = {
+        "name": "task_v2",
+        "params": {"subagent_type": "general-purpose"},
+        "result": {"agentId": "child-resumed"},
+        "additionalData": {"status": "aborted"},
+    }
+    con.execute("UPDATE cursorDiskKV SET value = ? WHERE key = ?", (json.dumps(first), first_key))
+    second = {
+        "type": 2,
+        "text": "resumed",
+        "startedAtMs": 1200,
+        "completedAtMs": 1250,
+        "toolFormerData": {
+            "name": "task_v2",
+            "params": {"resume": "child-resumed"},
+            "result": {"agentId": "child-resumed"},
+            "additionalData": {"status": "success"},
+        },
+    }
+    con.execute("INSERT INTO cursorDiskKV VALUES (?, ?)", (f"bubbleId:{session_id}:bubble-002", json.dumps(second)))
+    headers_key = f"composerConvHeaders:{session_id}:000000"
+    con.execute(
+        "UPDATE cursorDiskKV SET value = ? WHERE key = ?",
+        (
+            json.dumps([
+                {"bubbleId": "bubble-000", "type": 1},
+                {"bubbleId": "bubble-001", "type": 2},
+                {"bubbleId": "bubble-002", "type": 2},
+            ]),
+            headers_key,
+        ),
+    )
+    child_data = {
+        "name": "Resumed Coder",
+        "createdAt": 10,
+        "lastUpdatedAt": 20,
+        "status": "aborted",
+        "isSubagent": True,
+        "parentComposerId": session_id,
+    }
+    con.execute("INSERT INTO cursorDiskKV VALUES (?, ?)", ("composerData:child-resumed", json.dumps(child_data)))
+    con.execute("INSERT INTO cursorDiskKV VALUES (?, ?)", ("bubbleId:child-resumed:user", json.dumps({"type": 1, "text": "fix"})))
+    con.execute("INSERT INTO cursorDiskKV VALUES (?, ?)", ("composerConvHeaders:child-resumed:000000", json.dumps([{"bubbleId": "user", "type": 1}])))
+    con.commit()
+    con.close()
+
+    session = CursorAdapter().extract_session(session_id, ExtractOptions(state_db=state, tracking_db=tracking))
+    assert len(session.subagents) == 1
+    assert session.subagents[0].status == "completed"
+    assert session.subagents[0].subagent_type == "general-purpose"
+
+
+

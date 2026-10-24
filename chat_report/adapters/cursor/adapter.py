@@ -72,13 +72,17 @@ def _normalize_session_status(raw_status: Any, turns: list[TurnIR], dispatch_sta
     """Normalize Cursor's inconsistent completed-session status values."""
     status = _text(raw_status).strip().lower()
     dispatch = (dispatch_status or "").strip().lower()
-    if status in ("aborted", "cancelled", "canceled") or dispatch in ("aborted", "cancelled", "canceled"):
+    if dispatch in ("aborted", "cancelled", "canceled"):
         return "aborted"
     if status in ("error", "errored", "failed") or dispatch in ("error", "errored", "failed"):
         return "errored"
+    if dispatch in ("completed", "success"):
+        return "completed"
+    if status in ("aborted", "cancelled", "canceled"):
+        return "aborted"
     if status in ("running", "loading", "in_progress"):
         return "running"
-    if status in ("completed", "success") or dispatch in ("completed", "success"):
+    if status in ("completed", "success"):
         return "completed"
     if status in ("none", "", "unknown") and turns:
         return "completed"
@@ -451,17 +455,24 @@ class CursorAdapter:
                 })
                 continue
             reads = [call.target_path for turn in child.turns for call in turn.tool_calls if call.canonical_kind == "file_read" and not call.is_error and call.target_path]
-            dispatch_call = next((call for turn in session.turns for call in turn.tool_calls if call.subagent_session_id and normalize_session_id(call.subagent_session_id) == norm_sub), None)
-            dispatch_status = None
+            dispatch_calls = [
+                call
+                for turn in session.turns
+                for call in turn.tool_calls
+                if call.subagent_session_id and normalize_session_id(call.subagent_session_id) == norm_sub
+            ]
+            dispatch_call = dispatch_calls[-1] if dispatch_calls else None
+            dispatch_status = _text(dispatch_call.input_params.get("_dispatch_status")) or None if dispatch_call else None
             resolved_sub_type = child.subagent_type
-            if dispatch_call:
-                dispatch_status = _text(dispatch_call.input_params.get("_dispatch_status")) or None
-                if not resolved_sub_type:
+            if not resolved_sub_type:
+                for call in dispatch_calls:
                     for key in ("subagent_type", "name", "subagentType"):
-                        candidate = _clean_subagent_type(dispatch_call.input_params.get(key))
+                        candidate = _clean_subagent_type(call.input_params.get(key))
                         if candidate:
                             resolved_sub_type = candidate
                             break
+                    if resolved_sub_type:
+                        break
             session.subagents.append(SubagentSummaryIR(sub_id, dispatch.get(norm_sub), resolved_sub_type, child.title, child.model_name,
                 _normalize_session_status(child.status, child.turns, dispatch_status), child.duration_ms, len(child.turns), sum(len(t.tool_calls) for t in child.turns),
                 sum(1 for t in child.turns for c in t.tool_calls if c.is_error), sum(1 for t in child.turns for c in t.tool_calls if c.is_denied),

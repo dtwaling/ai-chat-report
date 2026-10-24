@@ -83,7 +83,7 @@ python -m chat_report --bundle-into <dest_skill_dir> --force
    - Do not add third-party runtime dependencies. Use Python 3.10+ standard library modules only.
    - Keep all strings and documentation cross-platform and ASCII-clean.
 3. **Preserve database immutability:**
-   - Open SQLite databases strictly through `open_ro()` (`?mode=ro`). Never write to or lock host databases.
+   - Open SQLite databases strictly through `chat_report.adapters.cursor.store.open_ro()` (`?mode=ro`, with paths from `chat_report.adapters.cursor.paths.resolve_state_db()`). Never write to or lock host databases.
 4. **Sync local skill bundle after code or skill edits:**
    - `.cursor/skills/chat-report/` is a bundled copy of `skills/chat-report/` and `chat_report/`.
    - After modifying `chat_report/` or `skills/chat-report/`, refresh the local bundle:

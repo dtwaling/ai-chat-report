@@ -336,7 +336,7 @@ def evaluate_diagnostics(session: SessionIR, workspace: Path | None = None) -> l
         if sub.status != "completed" or sub.denial_count > 0 or high_error_rate:
             norm_sub = normalize_session_id(sub.session_id)
             dispatch = next(
-                (call for call in calls if call.subagent_session_id and normalize_session_id(call.subagent_session_id) == norm_sub),
+                (call for call in reversed(calls) if call.subagent_session_id and normalize_session_id(call.subagent_session_id) == norm_sub),
                 None,
             )
             fallback_turn = next((turn for turn in session.turns if turn.turn_index == sub.parent_turn_index), None)
