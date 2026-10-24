@@ -71,7 +71,7 @@ def test_adapter_registry_and_side_effect_free_package_import():
         sys.executable,
         "-c",
         "import sys, chat_report; "
-        "assert chat_report.__version__ == '2.0.0'; "
+        "assert chat_report.__version__ == '2.0.1'; "
         "assert 'chat_report.adapters.cursor.adapter' not in sys.modules; "
         "import chat_report.adapters; "
         "from chat_report.core.adapter import get_adapter, register_adapter; "

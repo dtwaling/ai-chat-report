@@ -77,7 +77,7 @@ python -m chat_report --validate path/to/report.json
 | `--tracking-db <path>` | Explicit path to Cursor `ai-code-tracking.db`. |
 | `--denial-marker <str>` | Repeatable custom hook or harness denial substring marker. |
 | `--verbose` | Enable verbose diagnostic output. |
-| `-V`, `--version` | Print the package and schema version (`chat-report 2.0.0 (schema 2.0)`) and exit. |
+| `-V`, `--version` | Print the package and schema version (`chat-report 2.0.1 (schema 2.0)`) and exit. |
 
 ### Environment Variables
 
@@ -149,9 +149,9 @@ The bundler accepts `--bundle-into <dest>` or `--bundle-into=<dest>`, plus `--fo
 
 ## Versioning and Release Policy
 
-- **Package version (`chat_report.__version__`):** Uses Semantic Versioning (`MAJOR.MINOR.PATCH`, currently `2.0.0`). Run `python -m chat_report --version` (or `-V`) to inspect the installed package and schema version.
+- **Package version (`chat_report.__version__`):** Uses Semantic Versioning (`MAJOR.MINOR.PATCH`, currently `2.0.1`). Run `python -m chat_report --version` (or `-V`) to inspect the installed package and schema version.
 - **Report contract version (`SCHEMA_VERSION` / `schema_version`):** Currently `"2.0"`, enforced offline by `python -m chat_report --validate <report.json>`. Breaking changes to report structure, field types, or arithmetic invariants increment the schema version. Backward-compatible bug fixes and internal adapter refinements increment the package minor or patch version.
-- **Git release tags:** Annotated git tags (`v<MAJOR>.<MINOR>.<PATCH>`, such as `v0.1.0` and `v2.0.0`) mark verified release milestones on `master`.
+- **Git release tags:** Annotated git tags (`v<MAJOR>.<MINOR>.<PATCH>`, such as `v0.1.0`, `v2.0.0`, and `v2.0.1`) mark verified release milestones on `master`.
 
 ---
 

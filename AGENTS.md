@@ -65,7 +65,7 @@ python -m chat_report --bundle-into <dest_skill_dir> --force
 | `--tracking-db <path>`     | OS default                   | Override path to Cursor `ai-code-tracking.db`.                                             |
 | `--denial-marker <str>`    | `[]`                         | Repeatable custom hook or harness denial substring marker.                                 |
 | `--verbose`                | `False`                      | Print diagnostic parse warnings to stderr.                                                 |
-| `-V`, `--version`          | -                            | Print `chat-report 2.0.0 (schema 2.0)` and exit.                                           |
+| `-V`, `--version`          | -                            | Print `chat-report 2.0.1 (schema 2.0)` and exit.                                           |
 
 ### Environment Variables & Exit Codes
 

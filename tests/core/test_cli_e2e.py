@@ -334,7 +334,7 @@ def test_cli_boolean_flag_values_and_quoted_paths(tmp_path: Path) -> None:
 
 
 def test_version_constants_and_cli_version_flags() -> None:
-    assert chat_report.__version__ == "2.0.0"
+    assert chat_report.__version__ == "2.0.1"
     assert chat_report.SCHEMA_VERSION == "2.0"
     assert SCHEMA_VERSION == "2.0"
     repository = Path(__file__).parents[2]
@@ -353,5 +353,5 @@ def test_version_constants_and_cli_version_flags() -> None:
                 check=True,
             )
             assert result.returncode == 0
-            assert result.stdout.strip() == "chat-report 2.0.0 (schema 2.0)"
+            assert result.stdout.strip() == "chat-report 2.0.1 (schema 2.0)"
 
