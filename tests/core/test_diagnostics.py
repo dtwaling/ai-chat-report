@@ -147,10 +147,56 @@ def test_h04_h05_h06_and_h08_contracts() -> None:
     assert finding.evidence == {"recovered": True, "looped": True}
     edits = [_call(1, "file_edit", path="a.py"), _call(2, "workflow_control"), _call(3, "file_edit", turn=2, path="a.py"), _call(4, "shell_exec", turn=2, error=True, params={"command": "pytest a.py"}), _call(5, "file_edit", turn=3, path="a.py")]
     edits[1].raw_tool_name = "ReadLints"
-    assert any(f.id == HEURISTIC_IDS[4] for f in evaluate_diagnostics(_session(edits)))
+    h05_edit_finding = next(f for f in evaluate_diagnostics(_session(edits)) if f.id == HEURISTIC_IDS[4])
+    assert h05_edit_finding.turn_index == 3 and h05_edit_finding.bubble_id == "b3"
     clean_lints = [_call(1, "file_edit", path="a.py"), _call(2, "workflow_control", output="No linter errors found."), _call(3, "file_edit", turn=2, path="a.py"), _call(4, "workflow_control", turn=2, output="No linter errors found."), _call(5, "file_edit", turn=3, path="a.py")]
     clean_lints[1].raw_tool_name = clean_lints[3].raw_tool_name = "ReadLints"
     assert not any(f.id == HEURISTIC_IDS[4] for f in evaluate_diagnostics(_session(clean_lints)))
+    clean_json_lints = [
+        _call(1, "file_edit", path="a.py"),
+        _call(2, "workflow_control", params={"paths": ["a.py"]}, output='{"linterErrorsByFile": [{"relativeWorkspacePath": "a.py"}]}'),
+        _call(3, "file_edit", turn=2, path="a.py"),
+        _call(4, "workflow_control", turn=2, params={"paths": ["a.py"]}, output='{"linterErrorsByFile": [{"relativeWorkspacePath": "a.py", "linterErrors": [ ]}'[:75]),
+        _call(5, "file_edit", turn=3, path="a.py"),
+    ]
+    clean_json_lints[1].raw_tool_name = clean_json_lints[3].raw_tool_name = "read_lints"
+    assert not any(f.id == HEURISTIC_IDS[4] for f in evaluate_diagnostics(_session(clean_json_lints)))
+    truncated_mixed_output = (
+        '{"linterErrorsByFile": [{"relativeWorkspacePath": "a.py"}, '
+        '{"relativeWorkspacePath": "other.py", "linterErrors": [{"message": "unterminated string literal'
+    )
+    truncated_mixed_lints = [
+        _call(1, "file_edit", path="a.py"),
+        _call(2, "file_edit", path="other.py"),
+        _call(3, "workflow_control", params={"paths": ["a.py", "other.py"]}, output=truncated_mixed_output),
+        _call(4, "file_edit", turn=2, path="a.py"),
+        _call(5, "file_edit", turn=2, path="other.py"),
+        _call(6, "workflow_control", turn=2, params={"paths": ["a.py", "other.py"]}, output=truncated_mixed_output),
+        _call(7, "file_edit", turn=3, path="a.py"),
+        _call(8, "file_edit", turn=3, path="other.py"),
+    ]
+    truncated_mixed_lints[2].raw_tool_name = truncated_mixed_lints[5].raw_tool_name = "read_lints"
+    truncated_mixed_h05 = [f.finding_key for f in evaluate_diagnostics(_session(truncated_mixed_lints)) if f.id == HEURISTIC_IDS[4]]
+    assert truncated_mixed_h05 == ["H05_EDIT_LINT_THRASH:other.py"]
+    errored_json_lints = [
+        _call(1, "file_edit", path="a.py"),
+        _call(2, "workflow_control", params={"paths": ["a.py"]}, output='{"linterErrorsByFile": [{"relativeWorkspacePath": "a.py", "linterErrors": [{"message": "unused import"}]}]}'),
+        _call(3, "file_edit", turn=2, path="a.py"),
+        _call(4, "workflow_control", turn=2, params={"paths": ["a.py"]}, output='{"linterErrorsByFile": [{"relativeWorkspacePath": "a.py", "linterErrors": [{"message": "type error"}]}]}'),
+        _call(5, "file_edit", turn=4, path="a.py"),
+    ]
+    errored_json_lints[1].raw_tool_name = errored_json_lints[3].raw_tool_name = "read_lints"
+    errored_h05 = next(f for f in evaluate_diagnostics(_session(errored_json_lints)) if f.id == HEURISTIC_IDS[4])
+    assert errored_h05.turn_index == 4
+    mixed_json_lints = [
+        _call(1, "file_edit", path="a.py"),
+        _call(2, "workflow_control", params={"paths": ["a.py", "other.py"]}, output='{"linterErrorsByFile": [{"relativeWorkspacePath": "a.py"}, {"relativeWorkspacePath": "other.py", "linterErrors": [{"message": "err"}]}]}'),
+        _call(3, "file_edit", turn=2, path="a.py"),
+        _call(4, "workflow_control", turn=2, params={"paths": ["a.py", "other.py"]}, output='{"linterErrorsByFile": [{"relativeWorkspacePath": "a.py"}, {"relativeWorkspacePath": "other.py", "linterErrors": [{"message": "err"}]}]}'),
+        _call(5, "file_edit", turn=3, path="a.py"),
+    ]
+    mixed_json_lints[1].raw_tool_name = mixed_json_lints[3].raw_tool_name = "read_lints"
+    assert not any(f.id == HEURISTIC_IDS[4] for f in evaluate_diagnostics(_session(mixed_json_lints)))
     other_paths_lint = [_call(1, "file_edit", path="a.py"), _call(2, "workflow_control", path="other.py", params={"paths": ["other.py"]}, output="line 1: error"), _call(3, "file_edit", turn=2, path="a.py"), _call(4, "workflow_control", turn=2, path="other.py", params={"paths": ["other.py"]}, output="line 1: error"), _call(5, "file_edit", turn=3, path="a.py")]
     other_paths_lint[1].raw_tool_name = other_paths_lint[3].raw_tool_name = "ReadLints"
     assert not any(f.id == HEURISTIC_IDS[4] for f in evaluate_diagnostics(_session(other_paths_lint)))

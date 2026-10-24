@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections import defaultdict
 from pathlib import Path
@@ -254,9 +255,45 @@ def evaluate_diagnostics(session: SessionIR, workspace: Path | None = None) -> l
             def validation_targets_file(call: ToolCallIR) -> bool:
                 lint_name = call.raw_tool_name.lower() in ("read_lints", "readlints") or (call.mcp_tool_name or "").lower() in ("read_lints", "readlints")
                 if lint_name:
-                    out_lower = (call.output_summary or "").strip().lower()
+                    out_raw = (call.output_summary or "").strip()
+                    out_lower = out_raw.lower()
                     if "no linter errors" in out_lower or out_lower in ("[]", '{"lints": []}', '{"diagnostics": []}', '{"lints":[]}', '{"diagnostics":[]}'):
                         return False
+                    if out_raw.startswith("{"):
+                        try:
+                            parsed_out = json.loads(out_raw)
+                        except json.JSONDecodeError:
+                            parsed_out = None
+                        if isinstance(parsed_out, dict) and isinstance(parsed_out.get("linterErrorsByFile"), list):
+                            errored_paths: list[str] = []
+                            for entry in parsed_out["linterErrorsByFile"]:
+                                if isinstance(entry, dict) and any(
+                                    isinstance(entry.get(k), list) and len(entry[k]) > 0
+                                    for k in ("linterErrors", "diagnostics", "errors")
+                                ):
+                                    rel = entry.get("relativeWorkspacePath") or entry.get("path")
+                                    if isinstance(rel, str) and rel.strip():
+                                        errored_paths.append(canonicalize_path(rel, workspace))
+                            if not errored_paths:
+                                return False
+                            return any(
+                                p == path or path.startswith(f"{p.rstrip('/')}/")
+                                for p in errored_paths
+                            )
+                        if parsed_out is None and bool(re.match(r'^\{\s*"lintererrorsbyfile"\s*:', out_lower)):
+                            matches = list(re.finditer(r'"relativeworkspacepath"\s*:\s*"([^"]+)"', out_raw, re.I))
+                            errored_paths = []
+                            for idx, match in enumerate(matches):
+                                end = matches[idx + 1].start() if idx + 1 < len(matches) else len(out_raw)
+                                segment = out_raw[match.start() : end]
+                                if re.search(r'"(?:lintererrors|diagnostics|errors)"\s*:\s*\[\s*[{"]', segment, re.I):
+                                    rel = match.group(1).strip()
+                                    if rel:
+                                        errored_paths.append(canonicalize_path(rel, workspace))
+                            return any(
+                                p == path or path.startswith(f"{p.rstrip('/')}/")
+                                for p in errored_paths
+                            )
                     lint_details = f"{call.input_summary} {call.output_summary}".lower()
                     lint_name_match = bool(re.search(rf"(?<![\w.-]){re.escape(Path(path).name.lower())}(?![\w.-])", lint_details))
                     raw_paths = call.input_params.get("paths")
@@ -282,7 +319,7 @@ def evaluate_diagnostics(session: SessionIR, workspace: Path | None = None) -> l
             if any(validation_targets_file(c) for c in between):
                 intervals += 1
         if len(changes) >= 3 and len({c.turn_index for c in changes}) >= 2 and intervals >= 2:
-            findings.append(_finding(HEURISTIC_IDS[4], path, "Edit-Lint-Edit Regression Loop", "medium", call=changes[0],
+            findings.append(_finding(HEURISTIC_IDS[4], path, "Edit-Lint-Edit Regression Loop", "medium", call=changes[-1],
                 summary=f"{len(changes)} edits to {path} crossed {intervals} failed validation intervals.", evidence={"edit_count": len(changes), "validation_intervals": intervals}, hint="Fix the validation failure before making repeated edits."))
     rules = session.token_breakdown.by_category.get("rules", {}).get("tokens", 0)
     skills = session.token_breakdown.by_category.get("skills", {}).get("tokens", 0)
