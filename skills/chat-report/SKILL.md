@@ -9,6 +9,8 @@ Use this skill to produce a deterministic Cursor session report before any deep 
 
 ## Step 1: Run Stage 1
 
+`--latest` automatically skips empty composer tabs and in-flight Turn-1 `/chat-report` self-invocations to inspect the most recent substantive session. Pass `<uuid>` explicitly when the user wants to inspect a specific session (including the currently running session).
+
 Use one Shell call. From an installed skill:
 
 ```powershell

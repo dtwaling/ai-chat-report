@@ -46,6 +46,58 @@ def test_h01_ignores_available_catalog_attributes_and_bare_english_word() -> Non
     assert not any(f.id == HEURISTIC_IDS[0] for f in evaluate_diagnostics(session))
 
 
+def test_h01_credits_inlined_manually_attached_and_slash_attached_skills() -> None:
+    inlined_text = (
+        "<manually_attached_skills>\n"
+        "Skill Name: chat-report\n"
+        "Path: d:/repo/.cursor/skills/chat-report/SKILL.md\n"
+        "SKILL.md content:\n# Chat Report\n"
+        "</manually_attached_skills>\n"
+        "Use /chat-report"
+    )
+    inlined_session = _session(
+        [_call(1, "shell_exec", params={"command": "python -m chat_report --latest"})],
+        texts={1: inlined_text},
+        customizations=[CustomizationRefIR("skill", ".cursor/skills/chat-report/skill.md", "workspace_active")],
+    )
+    assert not any(f.id == HEURISTIC_IDS[0] for f in evaluate_diagnostics(inlined_session, Path("d:/repo")))
+
+    slash_attached_session = _session(
+        [_call(1, "shell_exec", params={"command": "python -m chat_report --latest"})],
+        texts={1: "Let's take this for a test run. Use /chat-report"},
+        customizations=[
+            CustomizationRefIR("skill", ".cursor/skills/chat-report/skill.md", "context_attached", 1),
+            CustomizationRefIR("skill", ".cursor/skills/chat-report/skill.md", "workspace_active"),
+        ],
+    )
+    assert not any(f.id == HEURISTIC_IDS[0] for f in evaluate_diagnostics(slash_attached_session))
+
+    unattached_slash_session = _session(
+        [_call(1, "shell_exec", params={"command": "echo hi"})],
+        texts={1: "Use /chat-report"},
+        customizations=[CustomizationRefIR("skill", ".cursor/skills/chat-report/skill.md", "workspace_active")],
+    )
+    assert any(f.id == HEURISTIC_IDS[0] for f in evaluate_diagnostics(unattached_slash_session))
+
+    legacy_tag_session = _session(
+        [_call(1, "file_write", path="x.canvas.tsx")],
+        texts={
+            1: (
+                '<manually_attached_skills>\n'
+                '<agent_skill fullPath="/skills/canvas/SKILL.md"/>\n'
+                '</manually_attached_skills>\n'
+                'Build a canvas.'
+            )
+        },
+        customizations=[
+            CustomizationRefIR("skill", "/skills/canvas/SKILL.md", "context_attached", 1),
+            CustomizationRefIR("skill", "/skills/can/SKILL.md", "workspace_active"),
+        ],
+    )
+    legacy_findings = [f for f in evaluate_diagnostics(legacy_tag_session) if f.id == HEURISTIC_IDS[0]]
+    assert [f.evidence["path"] for f in legacy_findings] == ["/skills/canvas/SKILL.md"]
+
+
 def test_h01_read_remains_satisfied_without_workspace(tmp_path: Path) -> None:
     workspace = tmp_path
     skill = workspace / ".cursor" / "skills" / "canvas" / "SKILL.md"

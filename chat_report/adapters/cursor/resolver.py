@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from typing import Any
 
@@ -168,6 +169,8 @@ def resolve_chat_id(
     cleaned = (raw_id or "").strip().strip("\"'").strip()
     if not cleaned:
         raise SessionNotFoundError("Session/Request UUID cannot be empty.")
+    if cleaned == "--latest" and not force:
+        return resolve_latest_session_id(state_con)
 
     if force == "chat-id":
         chat_hit = _lookup_chat_id(state_con, cleaned)
@@ -357,10 +360,57 @@ def list_recent_sessions(
     return [item[4] for item in fallback_candidates[:effective_limit]]
 
 
+def _classify_latest_candidate(state_con: sqlite3.Connection, session_id: str) -> tuple[bool, bool]:
+    """Return (has_bubbles, is_inflight_self_diagnostic) for a candidate session."""
+    try:
+        rows = state_con.execute(
+            "SELECT value FROM cursorDiskKV WHERE key >= ? AND key < ?",
+            (f"bubbleId:{session_id}:", f"bubbleId:{session_id};"),
+        ).fetchall()
+    except sqlite3.Error:
+        return False, False
+    if not rows:
+        cdata = _fetch_composer_data_dict(state_con, session_id)
+        headers = cdata.get("fullConversationHeadersOnly") if isinstance(cdata, dict) else None
+        return (isinstance(headers, list) and len(headers) > 0), False
+    bubbles = [b for (raw,) in rows if isinstance(b := _decode_json_blob(raw), dict)]
+    if not bubbles:
+        return False, False
+    user_bubbles = [b for b in bubbles if b.get("type") == 1]
+    tfds = [tfd for b in bubbles if isinstance(tfd := b.get("toolFormerData"), dict)]
+    loading_statuses = {"loading", "running", "in_progress"}
+    has_loading = any(str(t.get("status") or "").strip().lower() in loading_statuses for t in tfds)
+    if len(user_bubbles) <= 1 and has_loading:
+        completed = [t for t in tfds if str(t.get("status") or "").strip().lower() not in loading_statuses]
+        u0 = user_bubbles[0] if user_bubbles else {}
+        user_text = f"{u0.get('text') or ''}\n{u0.get('richText') or ''}".lower()
+        if re.search(r"(?<![\w/])/chat-report\b|chat-report/skill\.md", user_text):
+            return True, True
+        invocation_re = re.compile(
+            r"chat-report[/\\]+skill\.md|-m\s+chat_report\b|chat-report[/\\]+scripts[/\\]+run\.py|cursor[/\\]+chat-report\.py"
+        )
+        if completed and all(
+            bool(invocation_re.search(json.dumps(t.get("params") or t.get("rawArgs") or "").lower()))
+            for t in completed
+        ):
+            return True, True
+    return True, False
+
+
 def resolve_latest_session_id(state_con: sqlite3.Connection) -> ResolvedTarget:
     """Resolve the most recent main-thread session (always forcing list_include_subagents=False)."""
-    entries = list_recent_sessions(state_con, limit=1, list_include_subagents=False)
+    entries = list_recent_sessions(state_con, limit=20, list_include_subagents=False)
     if not entries:
         raise SessionNotFoundError("No main-thread Cursor sessions found in state.vscdb.")
-    latest_id = entries[0].session_id
+    first_with_bubbles: str | None = None
+    for entry in entries:
+        has_bubbles, is_inflight_self = _classify_latest_candidate(state_con, entry.session_id)
+        if not has_bubbles:
+            continue
+        if first_with_bubbles is None:
+            first_with_bubbles = entry.session_id
+            if is_inflight_self:
+                continue
+        return ResolvedTarget(session_id=entry.session_id, input_id="--latest", source="latest")
+    latest_id = first_with_bubbles or entries[0].session_id
     return ResolvedTarget(session_id=latest_id, input_id="--latest", source="latest")

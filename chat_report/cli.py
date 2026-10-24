@@ -286,10 +286,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{item.session_id}\t{item.last_updated_at_ms or item.created_at_ms or 0}\t{item.title or ''}\t{item.model_name or ''}\tsubagent={item.is_subagent}")
             return 0
         if args.latest:
-            entries = adapter.list_recent(1, options)
-            if not entries:
-                raise SessionNotFoundError("No Cursor sessions were found.")
-            target = ResolvedTarget(session_id=entries[0].session_id, input_id="--latest", source="latest")
+            target = adapter.resolve_id("--latest", options)
             session = classify_session(adapter.extract_session(target.session_id, options, resolved_from=target), workspace)
             report = build_single_session_report(session, workspace=workspace)
             markdown = render_single_session_md(report)

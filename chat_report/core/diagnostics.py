@@ -7,7 +7,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from chat_report.core.classifier import canonicalize_path, is_skill_path
-from chat_report.core.ir import CustomizationRefIR, DiagnosticFinding, HEURISTIC_IDS, SEVERITY_RANK, SessionIR, ToolCallIR, normalize_session_id
+from chat_report.core.ir import CustomizationRefIR, DiagnosticFinding, HEURISTIC_IDS, SEVERITY_RANK, SessionIR, ToolCallIR, TurnIR, normalize_session_id
 
 
 _SCHEMA_ERROR = re.compile(r"(schema|parameter|validation|required|unexpected|invalid argument)", re.I)
@@ -100,13 +100,35 @@ def _h01(session: SessionIR, workspace: Path | None, calls: list[ToolCallIR]) ->
     )
     read_paths.update(canonicalize_path(path, workspace).lower() for sub in session.subagents for path in sub.skills_read)
     known_paths = {canonicalize_path(ref.path, workspace).lower() for ref in known_skill_refs}
+    non_inlined_manual_turns: dict[str, TurnIR] = {}
     for turn in session.turns:
         manual_sections = re.findall(r"<manually_attached_skills>(.*?)</manually_attached_skills>", turn.user_text, re.S | re.I)
-        for raw_path in re.findall(r'<agent_skill\s+fullPath=["\']([^"\']+)["\']', turn.user_text, re.I):
+        inline_paths: list[str] = []
+        tag_manual_paths: list[str] = []
+        for section in manual_sections:
+            inlined_for_section = {
+                canonicalize_path(m.strip(), workspace).lower()
+                for m in re.findall(r"^\s*Path\s*:\s*(.+?)\s*(?:\r?\n)+\s*SKILL\.md\s+content\s*:", section, re.M | re.I)
+            }
+            for match in re.findall(r"^\s*Path\s*:\s*(.+?)\s*$", section, re.M | re.I):
+                cleaned_path = match.strip()
+                inline_paths.append(cleaned_path)
+                canon_inline = canonicalize_path(cleaned_path, workspace).lower()
+                if is_skill_path(canon_inline):
+                    if canon_inline in inlined_for_section:
+                        read_paths.add(canon_inline)
+                    else:
+                        non_inlined_manual_turns.setdefault(canon_inline, turn)
+            for raw_tag_path in re.findall(r'<agent_skill\s+fullPath=["\']([^"\']+)["\']', section, re.I):
+                tag_manual_paths.append(raw_tag_path)
+                canon_tag = canonicalize_path(raw_tag_path, workspace).lower()
+                if is_skill_path(canon_tag):
+                    non_inlined_manual_turns.setdefault(canon_tag, turn)
+        for raw_path in re.findall(r'<agent_skill\s+fullPath=["\']([^"\']+)["\']', turn.user_text, re.I) + inline_paths:
             path = canonicalize_path(raw_path, workspace)
             if not is_skill_path(path) or path.lower() in known_paths:
                 continue
-            source = "context_attached" if any(raw_path in section for section in manual_sections) else "workspace_active"
+            source = "context_attached" if (raw_path in inline_paths or raw_path in tag_manual_paths) else "workspace_active"
             ref = CustomizationRefIR("skill", path, source, turn.turn_index)
             known_skill_refs.append(ref)
             if source == "context_attached":
@@ -119,14 +141,16 @@ def _h01(session: SessionIR, workspace: Path | None, calls: list[ToolCallIR]) ->
         slug = Path(path).parent.name.lower()
         if not slug:
             continue
-        relevant_turn = None
-        mentioned = False
+        relevant_turn = non_inlined_manual_turns.get(path.lower())
+        mentioned = relevant_turn is not None
         for turn in session.turns:
             cleaned_user_text = re.sub(r"<available_skills\b[^>]*>.*?</available_skills>", "", turn.user_text, flags=re.S | re.I)
-            manual_attached = bool(re.search(r"<manually_attached_skills>.*?" + re.escape(slug) + r".*?</manually_attached_skills>", turn.user_text, re.S | re.I))
             prose = {match.lower() for match in re.findall(r"\b(?:use|follow|read|activate)\s+(?:the\s+)?([a-z0-9_-]{3,40})\s+skill\b", cleaned_user_text, re.I)}
             direct = bool(re.search(r"(?<![\w/])/" + re.escape(slug) + r"\b", cleaned_user_text, re.I))
-            if manual_attached or direct or slug in prose:
+            if direct and path.lower() in attached_paths and path.lower() not in non_inlined_manual_turns:
+                read_paths.add(path.lower())
+                continue
+            if direct or slug in prose:
                 mentioned, relevant_turn = True, turn
                 break
             if any(

@@ -89,7 +89,7 @@ def _item_path(value: Any) -> str | None:
     if isinstance(value, str) and value:
         return value
     if isinstance(value, dict):
-        for key in ("path", "relativeWorkspacePath", "uri"):
+        for key in ("path", "relativeWorkspacePath", "uri", "filename", "cursorRuleFilename"):
             path = value.get(key)
             if isinstance(path, str) and path:
                 return path
@@ -180,6 +180,9 @@ def _context_refs(bubble: dict[str, Any], turn_index: int) -> list[Customization
         if in_manual:
             for match in re.finditer(r"""fullpath\s*=\s*["']([^"']+)["']""", line, re.IGNORECASE):
                 refs.append(CustomizationRefIR("skill", match.group(1), "context_attached", turn_index))
+            path_match = re.match(r"^\s*path\s*:\s*(.+?)\s*$", line, re.IGNORECASE)
+            if path_match and _customization_kind(path_match.group(1)) == "skill":
+                refs.append(CustomizationRefIR("skill", path_match.group(1), "context_attached", turn_index))
     return refs
 
 

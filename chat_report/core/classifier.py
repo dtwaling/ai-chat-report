@@ -131,15 +131,30 @@ def classify_session(session: SessionIR, workspace: Path | None = None) -> Sessi
                     refs.append(CustomizationRefIR(kind, tool_call.target_path or "", "explicit_read", turn.turn_index))
                 elif tool_call.canonical_kind in {"file_edit", "file_write"}:
                     refs.append(CustomizationRefIR(kind, tool_call.target_path or "", "explicit_edit", turn.turn_index))
-    if workspace and workspace.is_dir():
-        refs.extend(_workspace_customizations(workspace))
+    workspace_refs = _workspace_customizations(workspace) if workspace and workspace.is_dir() else []
+    refs.extend(workspace_refs)
+    ws_by_suffix: dict[tuple[str, str], str] = {}
+    for ws_ref in workspace_refs:
+        ws_kind = _customization_kind(ws_ref.path) or ws_ref.kind
+        ws_path = canonicalize_path(ws_ref.path, workspace)
+        if ws_kind == "skill" and ws_path.lower().startswith(".cursor/skills/"):
+            ws_by_suffix[(ws_kind, ws_path[len(".cursor/skills/") :].lower())] = ws_path
+        elif ws_kind == "rule" and ws_path.lower().startswith(".cursor/rules/"):
+            ws_by_suffix[(ws_kind, ws_path[len(".cursor/rules/") :].lower())] = ws_path
     normalized: dict[tuple[str, str, str, int | None], CustomizationRefIR] = {}
     for ref in refs:
         kind = _customization_kind(ref.path) or ref.kind
         path = canonicalize_path(ref.path, workspace)
+        if kind:
+            path = ws_by_suffix.get((kind, path.lower()), path)
         if kind in {"skill", "rule", "agent_doc", "hook"} and path:
             normalized[(kind, path, ref.source, ref.turn_index)] = CustomizationRefIR(kind, path, ref.source, ref.turn_index)
     session.customizations = sorted(normalized.values(), key=lambda r: (r.path, r.kind, r.source, r.turn_index or -1))
+    for turn in session.turns:
+        turn.attached_rules = [
+            ws_by_suffix.get((_customization_kind(p) or "rule", canonicalize_path(p, workspace).lower()), p)
+            for p in turn.attached_rules
+        ]
     for subagent in session.subagents:
         subagent.skills_read = sorted({canonicalize_path(p, workspace) for p in subagent.skills_read if is_skill_path(p)})
         subagent.rules_read = sorted({canonicalize_path(p, workspace) for p in subagent.rules_read if is_rule_path(p)})

@@ -141,8 +141,8 @@ def select_live_smoke_session(adapter: HarnessAdapter, opts: ExtractOptions) -> 
         ir = adapter.extract_session(entry.session_id, opts)
         if len(ir.turns) >= 1 and fallback is None:
             fallback = ir
-            if ir.status == "completed" and any(turn.user_bubble_id != "__synthetic_turn_1__" for turn in ir.turns):
-                return ir
+        if ir.status == "completed" and any(turn.user_bubble_id != "__synthetic_turn_1__" for turn in ir.turns):
+            return ir
     if fallback is None:
         raise AssertionError("Listed Cursor sessions did not produce turns.")
     return fallback

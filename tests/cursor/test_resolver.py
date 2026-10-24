@@ -225,3 +225,50 @@ def test_list_recent_recognizes_subagent_info_in_v18_composer_data():
         ("main", False, None),
     ]
 
+
+def test_resolve_latest_skips_inflight_self_and_empty_tabs():
+    state_con = _state_connection()
+    _put_composer_data(state_con, "substantive", recency=1)
+    _put_composer_data(state_con, "empty-tab", recency=2)
+    _put_composer_data(state_con, "inflight-self", recency=3)
+    state_con.executemany(
+        "INSERT INTO cursorDiskKV VALUES (?, ?)",
+        [
+            ("bubbleId:substantive:u1", json.dumps({"type": 1, "text": "Fix bug"})),
+            ("bubbleId:substantive:t1", json.dumps({"type": 2, "toolFormerData": {"name": "edit_file_v2", "status": "completed"}})),
+            ("bubbleId:inflight-self:u1", json.dumps({"type": 1, "text": "Use /chat-report"})),
+            ("bubbleId:inflight-self:t1", json.dumps({"type": 2, "toolFormerData": {"name": "run_terminal_command_v2", "status": "loading"}})),
+        ],
+    )
+    assert resolve_latest_session_id(state_con).session_id == "substantive"
+
+    # A non-chat-report Turn-1 session with a completed repo read and a loading tool call must not be skipped
+    _put_composer_data(state_con, "normal-inflight", recency=4)
+    state_con.executemany(
+        "INSERT INTO cursorDiskKV VALUES (?, ?)",
+        [
+            (
+                "bubbleId:normal-inflight:u1",
+                json.dumps({"type": 1, "text": "Fix the chat_report parser bug", "workspaceUris": ["file:///d:/_Source/dtw-ai-chat-report"]}),
+            ),
+            (
+                "bubbleId:normal-inflight:t0",
+                json.dumps(
+                    {
+                        "type": 2,
+                        "toolFormerData": {
+                            "name": "read_file_v2",
+                            "status": "completed",
+                            "params": {"targetFile": "d:/_Source/dtw-ai-chat-report/chat_report/cli.py"},
+                        },
+                    }
+                ),
+            ),
+            (
+                "bubbleId:normal-inflight:t1",
+                json.dumps({"type": 2, "toolFormerData": {"name": "run_terminal_command_v2", "status": "loading"}}),
+            ),
+        ],
+    )
+    assert resolve_latest_session_id(state_con).session_id == "normal-inflight"
+

@@ -17,6 +17,7 @@ from chat_report.adapters.cursor.store import (
     order_bubbles,
 )
 from chat_report.core.adapter import ExtractOptions, StoreAccessError
+from chat_report.core.classifier import classify_session
 from chat_report.core.ir import ResolvedTarget
 from tests._fixtures import (
     create_legacy_early_state_db,
@@ -143,11 +144,18 @@ def test_manual_skills_accept_lowercase_fullpath_attribute(tmp_path):
     key = f"bubbleId:{session_id}:bubble-000"
     bubble = json.loads(con.execute("SELECT value FROM cursorDiskKV WHERE key = ?", (key,)).fetchone()[0])
     bubble["text"] = '<manually_attached_skills>\n<agent_skill fullpath="D:/skills/test/SKILL.md">\n</manually_attached_skills>'
+    bubble["context"]["cursorRules"] = [{"filename": "chat-report/SKILL.md", "slashSubject": {"kind": "skill"}}]
     con.execute("UPDATE cursorDiskKV SET value = ? WHERE key = ?", (json.dumps(bubble), key))
     con.commit()
     con.close()
-    session = CursorAdapter().extract_session(session_id, ExtractOptions(state_db=state, tracking_db=tracking))
+    skill_file = tmp_path / ".cursor" / "skills" / "chat-report" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True)
+    skill_file.write_text("# Chat Report", encoding="utf-8")
+    session = CursorAdapter().extract_session(session_id, ExtractOptions(state_db=state, tracking_db=tracking, workspace=tmp_path))
     assert any(ref.kind == "skill" and ref.path == "D:/skills/test/SKILL.md" for ref in session.customizations)
+    assert any(ref.kind == "skill" and ref.path == "chat-report/SKILL.md" and ref.source == "context_attached" for ref in session.customizations)
+    classify_session(session, tmp_path)
+    assert any(ref.kind == "skill" and ref.path == ".cursor/skills/chat-report/skill.md" and ref.source == "context_attached" for ref in session.customizations)
 
 
 def test_synthetic_turn_preserves_assistant_bubble_timestamps(tmp_path):
