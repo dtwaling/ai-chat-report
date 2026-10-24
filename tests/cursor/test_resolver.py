@@ -60,6 +60,53 @@ def test_resolve_chat_id_uses_chat_tracking_and_bubble_sources():
         resolve_chat_id("tracking-request", state_con, track_con, force="chat-id")
 
 
+def test_resolve_chat_id_via_composer_data_latest_generation_uuid_and_server_bubble_id():
+    state_con = _state_connection()
+    _put_composer_data(
+        state_con,
+        "85b4cac1-355a-47d0-b315-5a93e03640df",
+        latestChatGenerationUUID="d48e54ae-7761-4aa1-bae2-94598a62cfef",
+    )
+    state_con.execute(
+        "INSERT INTO cursorDiskKV VALUES (?, ?)",
+        (
+            "bubbleId:server-bubble-chat:bubble-001",
+            json.dumps({"requestId": "", "serverBubbleId": "9f1e2d3c-4b5a-6789-0123-456789abcdef"}),
+        ),
+    )
+    track_con = sqlite3.connect(":memory:")
+    track_con.execute("CREATE TABLE ai_code_hashes (requestId TEXT, conversationId TEXT)")
+
+    gen_unforced = resolve_chat_id(
+        '"D48E54AE-7761-4AA1-BAE2-94598A62CFEF"', state_con, track_con
+    )
+    assert (gen_unforced.session_id, gen_unforced.source) == (
+        "85b4cac1-355a-47d0-b315-5a93e03640df",
+        "request-id-scan",
+    )
+    gen_forced = resolve_chat_id(
+        "d48e54ae-7761-4aa1-bae2-94598a62cfef", state_con, track_con, force="request-id"
+    )
+    assert (gen_forced.session_id, gen_forced.source) == (
+        "85b4cac1-355a-47d0-b315-5a93e03640df",
+        "request-id-scan",
+    )
+    chat_upper = resolve_chat_id(
+        "85B4CAC1-355A-47D0-B315-5A93E03640DF", state_con, track_con
+    )
+    assert (chat_upper.session_id, chat_upper.source) == (
+        "85b4cac1-355a-47d0-b315-5a93e03640df",
+        "chat-id",
+    )
+    srv_bubble = resolve_chat_id(
+        "9F1E2D3C-4B5A-6789-0123-456789ABCDEF", state_con, track_con
+    )
+    assert (srv_bubble.session_id, srv_bubble.source) == (
+        "server-bubble-chat",
+        "request-id-scan",
+    )
+
+
 def test_list_recent_headers_excludes_subagents_and_resolves_metadata():
     state_con = _state_connection()
     state_con.execute(

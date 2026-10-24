@@ -77,30 +77,65 @@ def _fetch_composer_data_dict(state_con: sqlite3.Connection, composer_id: str) -
         return None
 
 
-def _lookup_chat_id(state_con: sqlite3.Connection, raw_id: str) -> bool:
-    row = state_con.execute(
-        "SELECT 1 FROM cursorDiskKV WHERE key = ? AND value IS NOT NULL",
-        (f"composerData:{raw_id}",),
-    ).fetchone()
-    return bool(row)
+def _lookup_chat_id(state_con: sqlite3.Connection, raw_id: str) -> str | None:
+    for candidate in dict.fromkeys((raw_id, raw_id.lower())):
+        row = state_con.execute(
+            "SELECT 1 FROM cursorDiskKV WHERE key = ? AND value IS NOT NULL",
+            (f"composerData:{candidate}",),
+        ).fetchone()
+        if row:
+            return candidate
+    return None
 
 
 def _lookup_request_id_in_tracking(track_con: sqlite3.Connection, raw_id: str) -> str | None:
-    row = track_con.execute(
-        "SELECT DISTINCT conversationId FROM ai_code_hashes WHERE requestId = ? LIMIT 1",
-        (raw_id,),
-    ).fetchone()
-    if row and row[0]:
-        return str(row[0])
+    for candidate in dict.fromkeys((raw_id, raw_id.lower())):
+        row = track_con.execute(
+            "SELECT DISTINCT conversationId FROM ai_code_hashes WHERE requestId = ? LIMIT 1",
+            (candidate,),
+        ).fetchone()
+        if row and row[0]:
+            return str(row[0])
+    return None
+
+
+def _scan_composer_data_for_request_id(state_con: sqlite3.Connection, raw_id: str) -> str | None:
+    target = raw_id.strip().lower()
+    if not target:
+        return None
+    prefix = "composerData:"
+    try:
+        rows = state_con.execute(
+            "SELECT key, value FROM cursorDiskKV "
+            "WHERE key >= 'composerData:' AND key < 'composerData;' "
+            "AND value IS NOT NULL AND CAST(value AS TEXT) LIKE ?",
+            (f"%{raw_id}%",),
+        )
+        for key_val, blob_val in rows:
+            key = str(key_val)
+            chat_id = key[len(prefix):] if key.startswith(prefix) else key
+            data = _decode_json_blob(blob_val)
+            if not isinstance(data, dict):
+                continue
+            for field in ("latestChatGenerationUUID", "chatGenerationUUID", "requestId"):
+                val = data.get(field)
+                if val is not None and str(val).strip().lower() == target:
+                    return chat_id
+    except sqlite3.Error:
+        return None
     return None
 
 
 def _scan_bubbles_for_request_id(state_con: sqlite3.Connection, raw_id: str) -> str | None:
+    target = raw_id.strip().lower()
+    if not target:
+        return None
     try:
         rows = state_con.execute(
             "SELECT key, value FROM cursorDiskKV "
-            "WHERE key LIKE 'bubbleId:%' AND value IS NOT NULL AND CAST(value AS TEXT) LIKE ?",
-            (f"%{raw_id}%",),
+            "WHERE key >= 'bubbleId:' AND key < 'bubbleId;' "
+            "AND value IS NOT NULL AND (CAST(value AS TEXT) LIKE ? OR key LIKE ?)",
+            (f"%{raw_id}%", f"%:{raw_id}%"),
         )
         for key_val, blob_val in rows:
             key = str(key_val)
@@ -109,7 +144,13 @@ def _scan_bubbles_for_request_id(state_con: sqlite3.Connection, raw_id: str) -> 
                 continue
             chat_id = parts[1]
             data = _decode_json_blob(blob_val)
-            if isinstance(data, dict) and data.get("requestId") == raw_id:
+            if not isinstance(data, dict):
+                continue
+            for field in ("requestId", "serverBubbleId", "bubbleId"):
+                val = data.get(field)
+                if val is not None and str(val).strip().lower() == target:
+                    return chat_id
+            if parts[2].split("/", 1)[0].strip().lower() == target:
                 return chat_id
     except sqlite3.Error:
         return None
@@ -124,13 +165,14 @@ def resolve_chat_id(
     force: str | None = None,
 ) -> ResolvedTarget:
     """Resolve raw_id via 4-way precedence or forced chat-id / request-id mode."""
-    cleaned = (raw_id or "").strip()
+    cleaned = (raw_id or "").strip().strip("\"'").strip()
     if not cleaned:
         raise SessionNotFoundError("Session/Request UUID cannot be empty.")
 
     if force == "chat-id":
-        if _lookup_chat_id(state_con, cleaned):
-            return ResolvedTarget(session_id=cleaned, input_id=cleaned, source="chat-id")
+        chat_hit = _lookup_chat_id(state_con, cleaned)
+        if chat_hit:
+            return ResolvedTarget(session_id=chat_hit, input_id=cleaned, source="chat-id")
         raise SessionNotFoundError(
             f"UUID '{cleaned}' not found as chat ID (composerData:{cleaned} absent in state.vscdb)."
         )
@@ -143,6 +185,9 @@ def resolve_chat_id(
                 hit = None
             if hit:
                 return ResolvedTarget(session_id=hit, input_id=cleaned, source="request-id")
+        composer_hit = _scan_composer_data_for_request_id(state_con, cleaned)
+        if composer_hit:
+            return ResolvedTarget(session_id=composer_hit, input_id=cleaned, source="request-id-scan")
         scanned = _scan_bubbles_for_request_id(state_con, cleaned)
         if scanned:
             return ResolvedTarget(session_id=scanned, input_id=cleaned, source="request-id-scan")
@@ -152,8 +197,9 @@ def resolve_chat_id(
 
     # Default unforced precedence:
     # Step 1: Direct chat-id lookup in cursorDiskKV
-    if _lookup_chat_id(state_con, cleaned):
-        return ResolvedTarget(session_id=cleaned, input_id=cleaned, source="chat-id")
+    chat_hit = _lookup_chat_id(state_con, cleaned)
+    if chat_hit:
+        return ResolvedTarget(session_id=chat_hit, input_id=cleaned, source="chat-id")
 
     # Step 2: Request ID in ai_code_hashes (when tracking DB available)
     if track_con is not None:
@@ -164,7 +210,12 @@ def resolve_chat_id(
         if hit:
             return ResolvedTarget(session_id=hit, input_id=cleaned, source="request-id")
 
-    # Step 3: Bubble scan in state.vscdb
+    # Step 3: Request/generation UUID in composerData
+    composer_hit = _scan_composer_data_for_request_id(state_con, cleaned)
+    if composer_hit:
+        return ResolvedTarget(session_id=composer_hit, input_id=cleaned, source="request-id-scan")
+
+    # Step 4: Bubble scan in state.vscdb
     scanned = _scan_bubbles_for_request_id(state_con, cleaned)
     if scanned:
         return ResolvedTarget(session_id=scanned, input_id=cleaned, source="request-id-scan")

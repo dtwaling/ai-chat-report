@@ -293,6 +293,14 @@ class CursorAdapter:
                     turn_times[current.turn_index].append(bubble_timestamps(bubble))
                     turn_bubbles[current.turn_index].append((bubble_id, bubble))
                     call_index += 1 if isinstance(bubble.get("toolFormerData"), dict) else 0
+            latest_gen_uuid = _text(data.get("latestChatGenerationUUID")).strip() or None
+            if (
+                latest_gen_uuid
+                and turns
+                and turns[-1].request_id is None
+                and latest_gen_uuid not in {t.request_id for t in turns if t.request_id}
+            ):
+                turns[-1].request_id = latest_gen_uuid
             for turn in turns:
                 bubbles = turn_bubbles.get(turn.turn_index, [])
                 timestamps = turn_times.get(turn.turn_index, [])
