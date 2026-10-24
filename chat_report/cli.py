@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import sys
@@ -25,6 +26,81 @@ from chat_report.core.render.json_v2 import (
 from chat_report.core.render.markdown import render_aggregate_md, render_diff_md, render_single_session_md
 
 
+_BOOLEAN_FLAGS = frozenset({
+    "--latest",
+    "--request-id",
+    "--chat-id",
+    "--agent-digest",
+    "--no-subagents",
+    "--list-include-subagents",
+    "--include-orphans",
+    "--verbose",
+})
+_TRUE_LITERALS = frozenset({"true", "1", "yes"})
+_FALSE_LITERALS = frozenset({"false", "0", "no"})
+_BOOL_LITERALS = _TRUE_LITERALS | _FALSE_LITERALS
+
+
+_ILLEGAL_PATH_CHARS = frozenset('"<>|?*\x00')
+
+
+def _clean_path(raw: str) -> Path:
+    cleaned = raw.strip().strip("\"'").strip()
+    if not cleaned:
+        raise argparse.ArgumentTypeError("path cannot be empty")
+    if '"' in cleaned or "\x00" in cleaned:
+        raise argparse.ArgumentTypeError(f"path contains illegal characters: {cleaned}")
+    check_target = cleaned[4:] if cleaned.startswith("\\\\?\\") else cleaned
+    if sys.platform == "win32" and any(char in _ILLEGAL_PATH_CHARS for char in check_target):
+        raise argparse.ArgumentTypeError(f"path contains illegal characters: {cleaned}")
+    return Path(cleaned)
+
+
+def _normalize_boolean_argv(argv: list[str]) -> list[str]:
+    """Normalize explicit boolean values on CLI boolean flags before argparse runs."""
+    normalized: list[str] = []
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token == "--":
+            normalized.extend(argv[index:])
+            break
+        if token in _BOOLEAN_FLAGS:
+            if index + 1 < len(argv) and argv[index + 1].strip().lower() in _BOOL_LITERALS:
+                if argv[index + 1].strip().lower() in _TRUE_LITERALS:
+                    normalized.append(token)
+                index += 2
+                continue
+            normalized.append(token)
+            index += 1
+            continue
+        if "=" in token:
+            flag, value = token.split("=", 1)
+            if flag in _BOOLEAN_FLAGS:
+                lowered = value.strip().lower()
+                if lowered in _TRUE_LITERALS:
+                    normalized.append(flag)
+                    index += 1
+                    continue
+                if lowered in _FALSE_LITERALS:
+                    index += 1
+                    continue
+        normalized.append(token)
+        index += 1
+    return normalized
+
+
+def _resolve_bundler_script() -> Path:
+    here = Path(__file__).resolve().parent
+    bundled_script = here.parent / "run.py"
+    if bundled_script.is_file():
+        return bundled_script
+    checkout_script = here.parent / "skills" / "chat-report" / "scripts" / "run.py"
+    if checkout_script.is_file():
+        return checkout_script
+    raise ValueError("Bundler script skills/chat-report/scripts/run.py was not found.")
+
+
 def strip_deprecated_v1_argv(argv: list[str]) -> tuple[list[str], bool]:
     """Remove deprecated v1 shape/tool flags before argparse sees them."""
     cleaned: list[str] = []
@@ -34,7 +110,10 @@ def strip_deprecated_v1_argv(argv: list[str]) -> tuple[list[str], bool]:
         argument = argv[index]
         if argument in {"--shape", "--tools"}:
             stripped = True
-            index += 2
+            if index + 1 < len(argv) and not argv[index + 1].startswith("-"):
+                index += 2
+            else:
+                index += 1
             continue
         if argument.startswith("--shape=") or argument.startswith("--tools="):
             stripped = True
@@ -53,20 +132,20 @@ def _parser() -> argparse.ArgumentParser:
     mode.add_argument("--list-recent", nargs="?", const=10, type=int, metavar="N")
     mode.add_argument("--diff", nargs=2, metavar=("BEFORE", "AFTER"))
     mode.add_argument("--aggregate", nargs="+", metavar="SESSION_ID")
-    mode.add_argument("--validate", type=Path, metavar="JSON_PATH")
+    mode.add_argument("--validate", type=_clean_path, metavar="JSON_PATH")
     id_kind = parser.add_mutually_exclusive_group()
     id_kind.add_argument("--request-id", action="store_true")
     id_kind.add_argument("--chat-id", action="store_true")
     parser.add_argument("--harness", default="cursor")
-    parser.add_argument("--out", type=Path, default=Path(".cursor/local/chat-reports"))
+    parser.add_argument("--out", type=_clean_path, default=Path(".cursor/local/chat-reports"))
     parser.add_argument("--format", choices=("md", "json", "both"), default="both")
     parser.add_argument("--agent-digest", action="store_true")
     parser.add_argument("--no-subagents", action="store_true")
     parser.add_argument("--list-include-subagents", action="store_true")
     parser.add_argument("--include-orphans", action="store_true")
-    parser.add_argument("--workspace", type=Path)
-    parser.add_argument("--state-db", type=Path)
-    parser.add_argument("--tracking-db", type=Path)
+    parser.add_argument("--workspace", type=_clean_path)
+    parser.add_argument("--state-db", type=_clean_path)
+    parser.add_argument("--tracking-db", type=_clean_path)
     parser.add_argument("--denial-marker", action="append", default=[])
     parser.add_argument("--verbose", action="store_true")
     return parser
@@ -169,11 +248,23 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
 def main(argv: list[str] | None = None) -> int:
     """Execute CLI mode and return a process exit code."""
     raw_argv = list(sys.argv[1:] if argv is None else argv)
-    argv, stripped = strip_deprecated_v1_argv(raw_argv)
-    if stripped:
-        print("[chat-report] WARNING: deprecated-v1-flag: --shape/--tools are deprecated in v2.0 and ignored.", file=sys.stderr)
-    parser = _parser()
     try:
+        if any(arg == "--bundle-into" or arg.startswith("--bundle-into=") for arg in raw_argv):
+            script_path = _resolve_bundler_script()
+            spec = importlib.util.spec_from_file_location("chat_report_skill_bundler", script_path)
+            if spec is None or spec.loader is None:
+                raise ValueError(f"Unable to load bundler script: {script_path}")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            destination, force = module._bundle_args(raw_argv)
+            if destination is not None:
+                module.bundle_into(destination, force)
+                return 0
+        argv, stripped = strip_deprecated_v1_argv(raw_argv)
+        if stripped:
+            print("[chat-report] WARNING: deprecated-v1-flag: --shape/--tools are deprecated in v2.0 and ignored.", file=sys.stderr)
+        argv = _normalize_boolean_argv(argv)
+        parser = _parser()
         args = parser.parse_args(argv)
         workspace = _validate_args(parser, args)
         if args.validate:

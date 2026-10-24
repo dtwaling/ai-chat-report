@@ -138,10 +138,11 @@ The `skills/chat-report/SKILL.md` skill implements a two-stage token-bounded wor
 Package `SKILL.md`, `scripts/run.py`, and the complete `chat_report` runtime into a standalone skill directory:
 
 ```powershell
-python skills/chat-report/scripts/run.py --bundle-into <dest_skill_dir> [--force]
+python skills/chat-report/scripts/run.py --bundle-into <dest_skill_dir> [--force | -f]
+python -m chat_report --bundle-into <dest_skill_dir> [--force | -f]
 ```
 
-The bundler stages files into a sibling temporary directory and swaps the destination atomically with automatic rollback on failure.
+The bundler accepts `--bundle-into <dest>` or `--bundle-into=<dest>`, plus `--force` / `-f` (as a bare flag, with an explicit boolean value such as `--force=true` or `--force true`, or as a trailing boolean argument). It stages files into a sibling temporary directory and swaps the destination atomically with automatic rollback on failure.
 
 ---
 

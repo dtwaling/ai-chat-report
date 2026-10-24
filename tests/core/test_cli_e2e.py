@@ -65,6 +65,9 @@ def test_deprecated_argument_strip(tmp_path: Path) -> None:
     cleaned, changed = strip_deprecated_v1_argv(["--shape", "wide", "--tools=all", "--latest"])
     assert changed
     assert cleaned == ["--latest"]
+    cleaned_adjacent, changed_adjacent = strip_deprecated_v1_argv(["--shape", "--latest", "--tools", "--agent-digest"])
+    assert changed_adjacent
+    assert cleaned_adjacent == ["--latest", "--agent-digest"]
     res = subprocess.run(
         [
             sys.executable,
@@ -246,3 +249,84 @@ def test_skill_bundler_overlap_force_rollback_and_isolated_execution(
         check=True,
     )
     assert main(["--validate", str(output / f"{DEFAULT_SESSION_ID}.json")]) == 0
+
+
+def test_bundler_arg_variants_quote_recovery_and_illegal_paths(tmp_path: Path) -> None:
+    repository = Path(__file__).parents[2]
+    run_script = repository / "skills" / "chat-report" / "scripts" / "run.py"
+    run_mod = _load_module(run_script)
+    dest = tmp_path / "bundle_target"
+
+    assert run_mod.main(["--bundle-into", str(dest)]) == 0
+    assert (dest / "SKILL.md").is_file()
+    assert run_mod.main(["--bundle-into", str(dest), "--force", "false"]) == 1
+    assert run_mod.main([f"--bundle-into={dest}", "--force=false"]) == 1
+    assert run_mod.main(["--bundle-into", str(dest), "false"]) == 1
+
+    for force_argv in (
+        ["--bundle-into", str(dest), "--force"],
+        [f"--bundle-into={dest}", "--force=true"],
+        ["--bundle-into", str(dest), "--force", "true"],
+        ["--bundle-into", str(dest), "--force", "1"],
+        ["--bundle-into", str(dest), "--force=yes"],
+        ["--bundle-into", str(dest), "true"],
+        ["--bundle-into", str(dest), "force"],
+        ["--bundle-into", str(dest), "-f"],
+    ):
+        assert run_mod.main(force_argv) == 0
+
+    quoted_dest = tmp_path / "quoted_bundle"
+    assert run_mod.main(["--bundle-into", f'"{quoted_dest}"']) == 0
+    assert (quoted_dest / "SKILL.md").is_file()
+
+    merged_dest = tmp_path / "merged_backslash_bundle"
+    merged_arg = f'{merged_dest}\\" --force'
+    assert run_mod.main(["--bundle-into", merged_arg]) == 0
+    assert (merged_dest / "SKILL.md").is_file()
+    assert run_mod.main(["--bundle-into", merged_arg]) == 0
+    assert not any("--force" in item.name or '"' in item.name for item in tmp_path.iterdir())
+
+    cli_bundle = tmp_path / "cli_bundle_target"
+    assert main(["--bundle-into", str(cli_bundle)]) == 0
+    assert (cli_bundle / "SKILL.md").is_file()
+    assert main([f"--bundle-into={cli_bundle}", "--force", "true"]) == 0
+
+    for invalid_dest in (
+        f'{tmp_path / "bad"}"mid',
+        f"{tmp_path / 'bad'}*glob",
+        f"{tmp_path / 'bad'}?char",
+        f"{tmp_path / 'bad'} --force --latest",
+        f"{tmp_path / 'bad'} --force",
+        "",
+        '""',
+    ):
+        assert run_mod.main(["--bundle-into", invalid_dest]) == 1
+
+    assert run_mod.main(["--bundle-into", str(dest), "--force=invalid"]) == 1
+    assert run_mod.main(["--bundle-into", str(dest), "false", "--force"]) == 1
+    assert run_mod.main(["--bundle-into", str(dest), "--latest"]) == 1
+
+    dash_f_dir = tmp_path / "my -f"
+    assert run_mod.main(["--bundle-into", str(dash_f_dir)]) == 0
+    assert (dash_f_dir / "SKILL.md").is_file()
+
+
+def test_cli_boolean_flag_values_and_quoted_paths(tmp_path: Path) -> None:
+    state = create_synthetic_state_db(tmp_path / "state.vscdb")
+    tracking = create_synthetic_tracking_db(tmp_path / "tracking.db")
+    out_dir = tmp_path / "out_quoted"
+    quoted_args = [
+        "--state-db", f'"{state}"',
+        "--tracking-db", f"'{tracking}'",
+        "--workspace", f'"{tmp_path}\\"',
+        "--out", f'"{out_dir}"',
+    ]
+    assert main(["--latest", "true", "--agent-digest=true", "--verbose=0", *quoted_args]) == 0
+    report_json = out_dir / f"{DEFAULT_SESSION_ID}.json"
+    assert report_json.is_file()
+    assert main(["--validate", f'"{report_json}"']) == 0
+    assert main(["--no-subagents", DEFAULT_SESSION_ID, *quoted_args]) == 0
+    assert main(["--no-subagents", "false", DEFAULT_SESSION_ID, *quoted_args]) == 0
+    assert main(["--request-id", "true", "request-0", *quoted_args]) == 0
+    assert main(["--latest=false", DEFAULT_SESSION_ID, *quoted_args]) == 0
+
