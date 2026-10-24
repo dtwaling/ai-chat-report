@@ -22,6 +22,24 @@ def _short(value: str, limit: int = 180) -> str:
     return compact if len(compact) <= limit else f"{compact[:limit - 3]}..."
 
 
+def _cell(value: Any, fallback: str = "unknown") -> str:
+    text = _text(value, fallback)
+    return " ".join(text.split()).replace("|", r"\|")
+
+
+def _tool_target_detail(call: dict[str, Any]) -> str | None:
+    params = call.get("input_params") if isinstance(call.get("input_params"), dict) else {}
+    for candidate in (
+        call.get("target_path"),
+        call.get("mcp_tool_name"),
+        params.get("command"),
+        params.get("description"),
+    ):
+        if candidate not in (None, ""):
+            return _short(str(candidate).replace("`", "'"), 80)
+    return None
+
+
 def render_single_session_md(report: dict[str, Any]) -> str:
     """Render a complete seven-section single-session report."""
     session, aggregates, diagnostics, turns = report["session"], report["aggregates"], report["diagnostics"], report["turns"]
@@ -49,9 +67,16 @@ def render_single_session_md(report: dict[str, Any]) -> str:
         f"- Orphan Bubbles Filtered: {session['orphan_bubble_count']}",
         "",
         "## 2. Prompt & Context Anatomy",
+    ]
+    total_context_used = token.get("total_context_tokens_used")
+    if isinstance(total_context_used, int) and not isinstance(total_context_used, bool):
+        context_limit = token.get("context_token_limit")
+        context_pct = float(token.get("context_usage_percent") or 0.0)
+        sections.append(f"- Context Usage: {total_context_used} / {context_limit or 'unknown'} tokens ({context_pct:.1f}%)")
+    sections.extend([
         "| Category | Tokens | % of prompt budget |",
         "| --- | ---: | ---: |",
-    ]
+    ])
     for category in categories:
         values = token["by_category"].get(category, {})
         count = int(values.get("tokens") or 0)
@@ -99,7 +124,10 @@ def render_single_session_md(report: dict[str, Any]) -> str:
     sections.append(f"- Per-tool counts: {', '.join(f'{name}={count}' for name, count in sorted(by_tool.items())) or 'None'}")
     sections.extend(["", "## 5. Subagent Rollup", "| Type | Session ID | Turns | Tool Calls | Errors | Skills Read | Duration ms |", "| --- | --- | ---: | ---: | ---: | --- | ---: |"])
     for subagent in session["subagents"]:
-        sections.append(f"| {_text(subagent['subagent_type'])} | `{subagent['session_id']}` | {subagent['turn_count']} | {subagent['tool_call_count']} | {subagent['error_count']} | {', '.join(subagent['skills_read']) or 'None'} | {_text(subagent['duration_ms'], 'unknown')} |")
+        skills_cell = _cell(", ".join(subagent["skills_read"]) or "None", "None")
+        sections.append(
+            f"| {_cell(subagent['subagent_type'])} | `{_cell(subagent['session_id'])}` | {subagent['turn_count']} | {subagent['tool_call_count']} | {subagent['error_count']} | {skills_cell} | {_cell(subagent['duration_ms'], 'unknown')} |"
+        )
     if not session["subagents"]:
         sections.append("| None | None | 0 | 0 | 0 | None | 0 |")
     sections.extend(["", "## 6. Turn-by-Turn Execution Timeline"])
@@ -108,7 +136,9 @@ def render_single_session_md(report: dict[str, Any]) -> str:
         for thinking in turn.get("thinking_blocks", []):
             sections.append(f"- Thinking ({_text(thinking.get('duration_ms'), 'unknown')} ms): {_short(thinking.get('text') or '')}")
         for call in turn.get("tool_calls", []):
-            sections.append(f"- Tool: `{call.get('raw_tool_name')}` [{call.get('status')}] {_text(call.get('elapsed_ms'), 'unknown')} ms")
+            detail = _tool_target_detail(call)
+            suffix = f" -> `{detail}`" if detail is not None else ""
+            sections.append(f"- Tool: `{call.get('raw_tool_name')}` [{call.get('status')}] {_text(call.get('elapsed_ms'), 'unknown')} ms{suffix}")
         for assistant_text in turn.get("assistant_texts", []):
             sections.append(f"- Assistant Output Summary: {_short(assistant_text)}")
     attribution = session.get("attribution")

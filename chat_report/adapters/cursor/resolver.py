@@ -26,6 +26,27 @@ def _decode_json_blob(value: Any) -> Any:
     return value
 
 
+def _clean_subagent_type(value: Any) -> str | None:
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned and cleaned.lower() not in ("unspecified", "unknown", "custom"):
+            return cleaned
+    return None
+
+
+def _subagent_meta_from_dict(data: dict[str, Any] | None) -> tuple[bool, str | None]:
+    if not isinstance(data, dict):
+        return False, None
+    sub_info = data.get("subagentInfo") if isinstance(data.get("subagentInfo"), dict) else {}
+    parent_id = (
+        (data.get("parentComposerId") if isinstance(data.get("parentComposerId"), str) and data.get("parentComposerId").strip() else None)
+        or (sub_info.get("parentComposerId") if isinstance(sub_info.get("parentComposerId"), str) and sub_info.get("parentComposerId").strip() else None)
+    )
+    is_sub = bool(data.get("isSubagent")) or bool(parent_id) or bool(sub_info)
+    sub_type = _clean_subagent_type(data.get("subagentTypeName")) or _clean_subagent_type(sub_info.get("subagentTypeName"))
+    return is_sub, sub_type
+
+
 def _extract_model_name(composer_data: dict[str, Any] | None) -> str | None:
     if not isinstance(composer_data, dict):
         return None
@@ -206,12 +227,13 @@ def list_recent_sessions(
                 created_ms = _to_int_or_none(r[3]) or _to_int_or_none(val_dict.get("createdAt"))
                 updated_ms = _to_int_or_none(r[4]) or _to_int_or_none(val_dict.get("lastUpdatedAt"))
                 is_sub = bool(r[5])
-                sub_type = r[6] if isinstance(r[6], str) and r[6].strip() else None
+                sub_type = _clean_subagent_type(r[6])
 
                 cdata = _fetch_composer_data_dict(state_con, cid)
-                if not is_sub and isinstance(cdata, dict):
-                    if bool(cdata.get("isSubagent")) or bool(cdata.get("parentComposerId")):
-                        is_sub = True
+                val_is_sub, val_sub_type = _subagent_meta_from_dict(val_dict)
+                c_is_sub, c_sub_type = _subagent_meta_from_dict(cdata)
+                if not is_sub and (val_is_sub or c_is_sub):
+                    is_sub = True
                 if not list_include_subagents and is_sub:
                     continue
 
@@ -221,10 +243,7 @@ def list_recent_sessions(
                     or (cdata.get("name") if isinstance(cdata, dict) and isinstance(cdata.get("name"), str) and cdata.get("name").strip() else None)
                 )
                 if not sub_type:
-                    sub_type = (
-                        (val_dict.get("subagentTypeName") if isinstance(val_dict.get("subagentTypeName"), str) else None)
-                        or (cdata.get("subagentTypeName") if isinstance(cdata, dict) and isinstance(cdata.get("subagentTypeName"), str) else None)
-                    )
+                    sub_type = val_sub_type or c_sub_type
                 if created_ms is None and isinstance(cdata, dict):
                     created_ms = _to_int_or_none(cdata.get("createdAt"))
                 if updated_ms is None and isinstance(cdata, dict):
@@ -252,7 +271,7 @@ def list_recent_sessions(
     fallback_candidates: list[tuple[int, int, int, str, SessionListEntry]] = []
     try:
         kv_rows = state_con.execute(
-            "SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%' AND value IS NOT NULL"
+            "SELECT key, value FROM cursorDiskKV WHERE key >= 'composerData:' AND key < 'composerData;' AND value IS NOT NULL"
         ).fetchall()
         prefix = "composerData:"
         for key_val, blob_val in kv_rows:
@@ -261,14 +280,13 @@ def list_recent_sessions(
             data = _decode_json_blob(blob_val)
             if not isinstance(data, dict):
                 continue
-            is_sub = bool(data.get("isSubagent")) or bool(data.get("parentComposerId"))
+            is_sub, sub_type = _subagent_meta_from_dict(data)
             if not list_include_subagents and is_sub:
                 continue
             created_ms = _to_int_or_none(data.get("createdAt"))
             updated_ms = _to_int_or_none(data.get("lastUpdatedAt"))
             recency = _to_int_or_none(data.get("recency")) or 0
             title = data.get("name") if isinstance(data.get("name"), str) and data.get("name").strip() else None
-            sub_type = data.get("subagentTypeName") if isinstance(data.get("subagentTypeName"), str) else None
             entry = SessionListEntry(
                 session_id=cid,
                 title=title,

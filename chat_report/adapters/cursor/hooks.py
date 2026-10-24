@@ -26,6 +26,7 @@ CONTEXT_DENIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
 _STRING_LITERAL_PATTERN = re.compile(r'''(?:"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)')''')
 _DENY_LINE_PATTERN = re.compile(r'\bdeny\b|"permissionDecision"\s*:\s*"deny"|\'permissionDecision\'\s*:\s*\'deny\'')
 _MESSAGE_FIELD_PATTERN = re.compile(r"\b(?:reason|message|agent_message|msg)\b", re.IGNORECASE)
+_DENIAL_TERM_PATTERN = re.compile(r"(?:deny|denied|block|blocked|reject|rejected)", re.IGNORECASE)
 _HOOK_SCRIPT_EXTENSIONS = (".py", ".js", ".mjs")
 
 
@@ -144,11 +145,16 @@ def extract_markers_from_hook_script(path: Path) -> list[str]:
         if not near_deny and not in_msg:
             continue
         for m in _STRING_LITERAL_PATTERN.finditer(line):
+            prefix = line[:m.start()].rstrip()
+            if line[m.end():].lstrip().startswith(":") and (not prefix or prefix[-1] in "{,("):
+                continue
             val = m.group(1) if m.group(1) is not None else m.group(2)
             if val is None:
                 continue
             val = val.replace("\\n", " ").replace('\\"', '"').replace("\\'", "'").strip()
             if len(val) < BARE_MARKER_MIN_LEN or "${" in val:
+                continue
+            if not any(ch.isspace() for ch in val) and not _DENIAL_TERM_PATTERN.search(val):
                 continue
             if val.startswith(("//", "/*", "node:", "node_modules", "http://", "https://")):
                 continue

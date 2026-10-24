@@ -127,3 +127,79 @@ def test_explicit_hook_rejection_and_large_non_rejection():
         "result": {"rejected": False, "exitCode": 1, "output": "x" * 500 + "Blocked by preToolUse hook"},
     }, call_index=2, turn_index=1, bubble_id="b")
     assert (not_rejected.status, not_rejected.is_denied) == ("error", False)
+
+
+def test_negative_hook_denial_controls_on_short_completed_outputs():
+    grep_call = map_tool_call({
+        "name": "ripgrep_raw_search",
+        "status": "completed",
+        "params": {"pattern": "hook"},
+        "result": {"output": "line 10: hook script blocked the test in fixture\nline 12: \"agent_message\": \"ok\""},
+    }, call_index=1, turn_index=1, bubble_id="b", denial_markers=("agent_message",))
+    assert (grep_call.status, grep_call.is_denied, grep_call.is_error) == ("completed", False, False)
+
+    shell_call = map_tool_call({
+        "name": "run_terminal_command_v2",
+        "status": "completed",
+        "params": {"command": "pytest -q"},
+        "result": {"exitCode": 0, "output": "test_guard_hook_blocked passed"},
+    }, call_index=2, turn_index=1, bubble_id="b")
+    assert (shell_call.status, shell_call.is_denied, shell_call.is_error) == ("completed", False, False)
+
+    grep_marker_line = map_tool_call({
+        "name": "ripgrep_raw_search",
+        "status": "completed",
+        "params": {"pattern": "Blocked by preToolUse hook"},
+        "result": {"output": 'tool_map.py:273:        "Blocked by preToolUse hook",'},
+    }, call_index=3, turn_index=1, bubble_id="b")
+    assert (grep_marker_line.status, grep_marker_line.is_denied, grep_marker_line.is_error) == ("completed", False, False)
+
+
+def test_user_decision_rejected_populates_denial_reason_and_gates_subagent_id():
+    call = map_tool_call({
+        "name": "read_file_v2",
+        "status": "completed",
+        "userDecision": "rejected",
+        "rawArgs": '{"file_path": "src/secret.py"}',
+        "additionalData": {"subagentComposerId": "should-not-attach"},
+        "result": {"agentId": "also-not-attach"},
+    }, call_index=1, turn_index=1, bubble_id="b")
+    assert call.status == "denied"
+    assert call.is_denied is True
+    assert call.denial_reason == "rejected by user"
+    assert call.target_path == "src/secret.py"
+    assert call.subagent_session_id is None
+
+
+def test_expanded_target_paths_tool_kinds_and_mcp_discovery_namespace():
+    nb_call = map_tool_call({
+        "name": "editnotebook",
+        "params": {"target_notebook": "notebooks/demo.ipynb"},
+        "result": {},
+    }, call_index=1, turn_index=1, bubble_id="b")
+    assert nb_call.canonical_kind == CanonicalToolKind.FILE_WRITE.value
+    assert nb_call.target_path == "notebooks/demo.ipynb"
+
+    plan_call = map_tool_call({
+        "name": "createplan",
+        "params": {"working_directory": "d:/repo"},
+        "result": {},
+    }, call_index=2, turn_index=1, bubble_id="b")
+    assert plan_call.canonical_kind == CanonicalToolKind.WORKFLOW_CONTROL.value
+    assert plan_call.target_path == "d:/repo"
+
+    lints_call = map_tool_call({
+        "name": "ReadLints",
+        "params": {"paths": ["src/first.py", "src/second.py"]},
+        "result": {},
+    }, call_index=3, turn_index=1, bubble_id="b")
+    assert lints_call.target_path == "src/first.py"
+
+    disc_call = map_tool_call({
+        "name": "GetDynamicTools",
+        "params": {"namespace": "plugin-eci-core-lore", "toolName": "repo_grep"},
+        "result": {},
+    }, call_index=4, turn_index=1, bubble_id="b")
+    assert disc_call.canonical_kind == CanonicalToolKind.MCP_DISCOVERY.value
+    assert (disc_call.mcp_namespace, disc_call.mcp_tool_name) == ("plugin-eci-core-lore", "repo_grep")
+

@@ -52,13 +52,24 @@ def bundle_into(destination: str, force: bool = False) -> None:
         if stage.exists():
             shutil.rmtree(stage, ignore_errors=True)
         if backup.exists():
-            if dest.exists():
-                shutil.rmtree(dest, ignore_errors=True)
-            os.replace(backup, dest)
+            try:
+                if dest.exists():
+                    shutil.rmtree(dest)
+                os.replace(backup, dest)
+            except OSError as rollback_exc:
+                print(
+                    f"[chat-report] WARNING: bundle rollback failed to restore {dest} from {backup}: {rollback_exc}",
+                    file=sys.stderr,
+                )
         raise
     else:
         if backup.exists():
             shutil.rmtree(backup, ignore_errors=True)
+            if backup.exists():
+                print(
+                    f"[chat-report] WARNING: bundle backup cleanup left temporary directory {backup}",
+                    file=sys.stderr,
+                )
 
 
 def _bundle_args(argv: list[str]) -> tuple[str | None, bool]:

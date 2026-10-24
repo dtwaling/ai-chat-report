@@ -59,6 +59,24 @@ def _assert_envelope(payload: dict[str, Any], expected_kind: str) -> None:
         _str(warning["message"], "warning.message")
 
 
+def _assert_attribution(attribution: Any) -> None:
+    if attribution is None:
+        return
+    _keys(attribution, {"composer_code_hashes_count", "human_code_hashes_count", "distinct_files_touched", "scored_commits"}, "attribution")
+    _int(attribution["composer_code_hashes_count"], "attribution.composer_code_hashes_count")
+    _int(attribution["human_code_hashes_count"], "attribution.human_code_hashes_count")
+    _assert(
+        isinstance(attribution["distinct_files_touched"], list)
+        and all(isinstance(x, str) for x in attribution["distinct_files_touched"]),
+        "attribution distinct files invalid",
+    )
+    _assert(
+        isinstance(attribution["scored_commits"], list)
+        and all(isinstance(x, dict) for x in attribution["scored_commits"]),
+        "attribution commits invalid",
+    )
+
+
 def _assert_session_block(session: Any) -> None:
     _assert(isinstance(session, dict), "session must be an object")
     expected = {
@@ -107,17 +125,18 @@ def _assert_session_block(session: Any) -> None:
     for subagent in session["subagents"]:
         _keys(subagent, {"session_id", "parent_turn_index", "subagent_type", "name", "model_name", "status", "duration_ms", "turn_count", "tool_call_count", "error_count", "denial_count", "skills_read", "rules_read"}, "subagent")
         _str(subagent["session_id"], "subagent.session_id")
+        for key in ("subagent_type", "name", "model_name", "status"):
+            _nullable_str(subagent[key], f"subagent.{key}")
         for key in ("parent_turn_index", "duration_ms"):
             _int(subagent[key], f"subagent.{key}", nullable=True)
         for key in ("turn_count", "tool_call_count", "error_count", "denial_count"):
             _int(subagent[key], f"subagent.{key}")
-    attribution = session["attribution"]
-    if attribution is not None:
-        _keys(attribution, {"composer_code_hashes_count", "human_code_hashes_count", "distinct_files_touched", "scored_commits"}, "attribution")
-        _int(attribution["composer_code_hashes_count"], "attribution.composer_code_hashes_count")
-        _int(attribution["human_code_hashes_count"], "attribution.human_code_hashes_count")
-        _assert(isinstance(attribution["distinct_files_touched"], list), "attribution distinct files invalid")
-        _assert(isinstance(attribution["scored_commits"], list), "attribution commits invalid")
+        for key in ("skills_read", "rules_read"):
+            _assert(
+                isinstance(subagent[key], list) and all(isinstance(x, str) for x in subagent[key]),
+                f"subagent.{key} must be a string list",
+            )
+    _assert_attribution(session["attribution"])
     resolved = session["resolved_from"]
     if resolved is not None:
         _keys(resolved, {"session_id", "input_id", "source"}, "resolved_from")
@@ -146,7 +165,16 @@ def _assert_aggregates(
     _assert(sum(aggregates["tool_calls_by_canonical_kind"].values()) == aggregates["tool_calls_total"], "canonical kind count total mismatch")
     if turns is not None:
         _assert(aggregates["thinking_block_count"] == sum(len(turn["thinking_blocks"]) for turn in turns), "thinking block count mismatch")
+        _assert(
+            aggregates["total_thinking_duration_ms"] == sum(b["duration_ms"] or 0 for t in turns for b in t["thinking_blocks"]),
+            "total thinking duration mismatch",
+        )
         _assert(aggregates["tool_calls_total"] == sum(len(turn["tool_calls"]) for turn in turns), "tool call total mismatch")
+        expected_statuses = {status: 0 for status in TOOL_CALL_STATUSES}
+        for turn in turns:
+            for call in turn["tool_calls"]:
+                expected_statuses[call["status"]] += 1
+        _assert(aggregates["status_counts"] == expected_statuses, "status counts distribution mismatch")
         expected_semantic = dict(sorted(Counter(call["semantic_class"] for turn in turns for call in turn["tool_calls"]).items()))
         expected_kinds = dict(sorted(Counter(call["canonical_kind"] for turn in turns for call in turn["tool_calls"]).items()))
         expected_namespaces = dict(sorted(Counter(
@@ -162,6 +190,11 @@ def _assert_aggregates(
     _keys(timing, {"total_session_ms", "total_tool_elapsed_ms", "slowest_tool_calls"}, "timing")
     _int(timing["total_session_ms"], "timing.total_session_ms", nullable=True)
     _int(timing["total_tool_elapsed_ms"], "timing.total_tool_elapsed_ms")
+    if turns is not None:
+        _assert(
+            timing["total_tool_elapsed_ms"] == sum(c["elapsed_ms"] or 0 for t in turns for c in t["tool_calls"]),
+            "total tool elapsed ms mismatch",
+        )
     _assert(isinstance(timing["slowest_tool_calls"], list) and len(timing["slowest_tool_calls"]) <= 5, "slowest tool calls invalid")
     previous: tuple[int, int] | None = None
     for call in timing["slowest_tool_calls"]:
@@ -178,7 +211,12 @@ def _assert_aggregates(
     customization = aggregates["customization_summary"]
     _keys(customization, {"skills_read", "rules_read", "attached_rules", "subagents_spawned"}, "customization summary")
     for key in ("skills_read", "rules_read", "attached_rules"):
-        _assert(isinstance(customization[key], list) and customization[key] == sorted(set(customization[key])), f"{key} must be sorted distinct paths")
+        _assert(
+            isinstance(customization[key], list)
+            and all(isinstance(x, str) for x in customization[key])
+            and customization[key] == sorted(set(customization[key])),
+            f"{key} must be sorted distinct paths",
+        )
     _int(customization["subagents_spawned"], "subagents_spawned")
     rollup = aggregates["subagent_rollup"]
     _keys(rollup, {"count", "by_type", "by_status", "total_tool_calls", "total_errors"}, "subagent rollup")
@@ -188,9 +226,18 @@ def _assert_aggregates(
     _int(rollup["total_tool_calls"], "subagent rollup.total_tool_calls")
     _int(rollup["total_errors"], "subagent rollup.total_errors")
     if session is not None:
+        _assert(timing["total_session_ms"] == session["duration_ms"], "timing.total_session_ms mismatch")
         customizations = session["customizations"]
         subagents = session["subagents"]
         _assert(customization["subagents_spawned"] == len(subagents) == rollup["count"], "subagent count mismatch")
+        _assert(
+            rollup["by_type"] == dict(sorted(Counter(s["subagent_type"] or "unknown" for s in subagents).items())),
+            "subagent rollup by_type mismatch",
+        )
+        _assert(
+            rollup["by_status"] == dict(sorted(Counter(s["status"] or "unknown" for s in subagents).items())),
+            "subagent rollup by_status mismatch",
+        )
         _assert(rollup["total_tool_calls"] == sum(item["tool_call_count"] for item in subagents), "subagent tool call total mismatch")
         _assert(rollup["total_errors"] == sum(item["error_count"] for item in subagents), "subagent error total mismatch")
         expected_skills = sorted({item["path"] for item in customizations if item["kind"] == "skill" and item["source"] == "explicit_read"})
@@ -206,22 +253,30 @@ def _assert_diagnostics(diagnostics: Any) -> None:
     _keys(diagnostics, {"total_findings", "by_severity", "findings"}, "diagnostics")
     _int(diagnostics["total_findings"], "diagnostics.total_findings")
     _count_map(diagnostics["by_severity"], "severity counts", set(SEVERITY_LEVELS))
+    _assert(isinstance(diagnostics["findings"], list), "diagnostics.findings must be a list")
     _assert(diagnostics["total_findings"] == len(diagnostics["findings"]) == sum(diagnostics["by_severity"].values()), "diagnostic total mismatch")
     keys: set[str] = set()
+    expected_severities = {severity: 0 for severity in SEVERITY_LEVELS}
     for finding in diagnostics["findings"]:
+        _assert(isinstance(finding, dict), "finding must be an object")
         required = {"id", "finding_key", "name", "severity", "turn_index", "bubble_id", "summary", "error_message", "thinking_snippet", "evidence", "remediation_hint"}
         _keys(finding, required, "finding")
         _assert(finding["id"] in HEURISTIC_IDS, "unknown finding ID")
         _assert(finding["severity"] in SEVERITY_LEVELS, "unknown finding severity")
+        expected_severities[finding["severity"]] += 1
+        _str(finding["finding_key"], "finding.finding_key")
         _assert(finding["finding_key"].startswith(f"{finding['id']}:"), "finding key mismatch")
         _assert(finding["finding_key"] not in keys, "diagnostics.findings finding_key must be unique")
         keys.add(finding["finding_key"])
+        _int(finding["turn_index"], "finding.turn_index", nullable=True)
+        _str(finding["bubble_id"], "finding.bubble_id", nullable=True)
         for key in ("name", "summary", "remediation_hint"):
             _assert(isinstance(finding[key], str) and bool(finding[key]), f"finding.{key} must be a non-empty string")
         for key in ("error_message", "thinking_snippet"):
             _assert(finding[key] is None or isinstance(finding[key], str), f"finding.{key} must be a string or null")
             _assert(finding[key] is None or len(finding[key]) <= 160, f"finding.{key} exceeds 160 characters")
         _assert(isinstance(finding["evidence"], dict), "finding.evidence must be an object")
+    _assert(diagnostics["by_severity"] == expected_severities, "diagnostics.by_severity distribution mismatch")
 
 
 def _nullable_str(value: Any, label: str) -> None:
@@ -293,6 +348,8 @@ def _assert_single(payload: dict[str, Any]) -> None:
     _assert_envelope(payload, "single-session")
     _keys(payload, {"schema_version", "report_kind", "generated_at_iso", "harness", "harness_version", "warnings", "session", "aggregates", "diagnostics", "turns"}, "single report")
     _assert_session_block(payload["session"])
+    _assert(payload["harness"] == payload["session"]["harness"], "single report harness mismatch")
+    _assert(payload["harness_version"] == payload["session"]["harness_version"], "single report harness_version mismatch")
     _assert(isinstance(payload["turns"], list), "turns must be a list")
     for index, turn in enumerate(payload["turns"], start=1):
         _assert_turn(turn, index)
@@ -325,10 +382,14 @@ def assert_v2_report_conforms(payload: dict[str, Any]) -> None:
         _keys(payload, {"schema_version", "report_kind", "generated_at_iso", "harness", "harness_version", "warnings", "before", "after", "delta"}, "diff report")
         _assert_single(payload["before"])
         _assert_single(payload["after"])
+        before, after = payload["before"], payload["after"]
+        expected_harness = before["harness"] if before["harness"] == after["harness"] else "mixed"
+        expected_version = before["harness_version"] if before["harness_version"] == after["harness_version"] else "mixed"
+        _assert(payload["harness"] == expected_harness, "diff harness mismatch")
+        _assert(payload["harness_version"] == expected_version, "diff harness_version mismatch")
         delta = payload["delta"]
         expected = {"turn_count_delta", "thinking_block_count_delta", "tool_calls_total_delta", "error_count_delta", "denial_count_delta", "duration_ms_delta", "context_tokens_used_delta", "by_semantic_class_delta", "by_canonical_kind_delta", "skills_read_added", "skills_read_removed", "rules_read_added", "rules_read_removed", "diagnostics_delta", "attribution_delta"}
         _keys(delta, expected, "delta")
-        before, after = payload["before"], payload["after"]
         _assert(delta["turn_count_delta"] == after["aggregates"]["turn_count"] - before["aggregates"]["turn_count"], "turn delta mismatch")
         _assert(delta["thinking_block_count_delta"] == after["aggregates"]["thinking_block_count"] - before["aggregates"]["thinking_block_count"], "thinking block delta mismatch")
         _assert(delta["tool_calls_total_delta"] == after["aggregates"]["tool_calls_total"] - before["aggregates"]["tool_calls_total"], "tool delta mismatch")
@@ -403,13 +464,17 @@ def assert_v2_report_conforms(payload: dict[str, Any]) -> None:
             _keys(summary, summary_keys, "aggregate session summary")
             _str(summary["session_id"], "aggregate session session_id")
             _str(summary["session_id_normalized"], "aggregate session session_id_normalized")
+            _assert(summary["session_id_normalized"] == summary["session_id"].strip().lower(), "aggregate session normalized ID mismatch")
             for key in ("title", "model_name", "status"):
                 _nullable_str(summary[key], f"aggregate session {key}")
             _int(summary["duration_ms"], "aggregate session duration_ms", nullable=True)
             _int(summary["total_lines_added"], "aggregate session total_lines_added")
             _int(summary["total_lines_removed"], "aggregate session total_lines_removed")
+            _assert_attribution(summary["attribution"])
             _assert_aggregates(summary["aggregates"], None)
             _assert_diagnostics(summary["diagnostics"])
+        _assert(bool(payload["harness"].strip()), "aggregate harness must be non-empty")
+        _assert(bool(payload["harness_version"].strip()), "aggregate harness_version must be non-empty")
         rollup = payload["rollup"]
         required = {"total_turns", "total_thinking_blocks", "total_tool_calls", "tool_calls_by_semantic_class", "tool_calls_by_canonical_kind", "mcp_calls_by_namespace", "status_counts", "diagnostics_rollup", "customization_rollup", "attribution_totals"}
         _keys(rollup, required, "aggregate rollup")

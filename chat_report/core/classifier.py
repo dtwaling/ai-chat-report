@@ -33,6 +33,8 @@ def canonicalize_path(raw_path: str | None, workspace: Path | None = None) -> st
         path = path.casefold()
     if workspace:
         root = canonicalize_path(str(workspace), None).rstrip("/")
+        if bool(re.match(r"^[A-Za-z]:/", root)) or root.startswith("//"):
+            path = path.casefold()
         if path == root:
             return ""
         if root and path.startswith(f"{root}/"):
@@ -48,7 +50,12 @@ def is_skill_path(path: str | None) -> bool:
 def is_rule_path(path: str | None) -> bool:
     value = (path or "").replace("\\", "/").lower()
     name = value.rsplit("/", 1)[-1]
-    return name.endswith(".mdc") or name == ".cursorrules" or name in {"agents.md", "claude.md"}
+    return (
+        name.endswith(".mdc")
+        or name == ".cursorrules"
+        or name in {"agents.md", "claude.md"}
+        or "/.cursor/rules/" in f"/{value}"
+    )
 
 
 def is_hook_path(path: str | None) -> bool:
@@ -101,7 +108,7 @@ def _workspace_customizations(workspace: Path) -> list[CustomizationRefIR]:
     cursor = workspace / ".cursor"
     if cursor.is_dir():
         candidates.extend(("skill", str(p)) for p in cursor.glob("skills/*/SKILL.md"))
-        candidates.extend(("rule", str(p)) for p in cursor.glob("rules/*.mdc"))
+        candidates.extend(("rule", str(p)) for p in cursor.glob("rules/**/*.mdc"))
         hooks = cursor / "hooks.json"
         if hooks.is_file():
             candidates.append(("hook", str(hooks)))

@@ -55,6 +55,8 @@ def test_h01_read_remains_satisfied_without_workspace(tmp_path: Path) -> None:
     classify_session(session, workspace)
     assert not any(f.id == HEURISTIC_IDS[0] for f in evaluate_diagnostics(session))
     assert not any(f["id"] == HEURISTIC_IDS[0] for f in build_diff_report(session, session)["before"]["diagnostics"]["findings"])
+    mixed_case = _session([_call(1, "file_read", path="/Skills/Canvas/SKILL.md")], texts={1: "use canvas skill"}, customizations=[CustomizationRefIR("skill", "/skills/canvas/SKILL.md", "context_attached"), CustomizationRefIR("skill", "SKILL.md", "context_attached")])
+    assert not any(f.id == HEURISTIC_IDS[0] for f in evaluate_diagnostics(mixed_case))
 
 
 def test_h02_discovery_filters_and_h03_empty_search() -> None:
@@ -81,6 +83,9 @@ def test_h03_uses_path_then_mcp_then_kind_precedence() -> None:
     kind_calls = [_call(i, "shell_exec", error=True) for i in range(7, 10)]
     keys = {finding.evidence["group_key"] for finding in evaluate_diagnostics(_session(path_calls + mcp_calls + kind_calls)) if finding.id == HEURISTIC_IDS[2] and finding.evidence.get("branch") == "4a"}
     assert keys == {"path:one.py", "mcp:x:same", "kind:shell_exec"}
+    cross_turn = [_call(1, "shell_exec", turn=1, error=True), _call(2, "shell_exec", turn=1, error=True), _call(3, "shell_exec", turn=2, error=True), _call(4, "shell_exec", turn=2, error=True), _call(5, "shell_exec", turn=2, error=True)]
+    thrash = [f for f in evaluate_diagnostics(_session(cross_turn)) if f.id == HEURISTIC_IDS[2]]
+    assert len(thrash) == 1 and thrash[0].evidence["call_indexes"] == [1, 2, 3, 4, 5]
 
 
 def test_h04_h05_h06_and_h08_contracts() -> None:
@@ -91,29 +96,72 @@ def test_h04_h05_h06_and_h08_contracts() -> None:
     edits = [_call(1, "file_edit", path="a.py"), _call(2, "workflow_control"), _call(3, "file_edit", turn=2, path="a.py"), _call(4, "shell_exec", turn=2, error=True, params={"command": "pytest a.py"}), _call(5, "file_edit", turn=3, path="a.py")]
     edits[1].raw_tool_name = "ReadLints"
     assert any(f.id == HEURISTIC_IDS[4] for f in evaluate_diagnostics(_session(edits)))
+    clean_lints = [_call(1, "file_edit", path="a.py"), _call(2, "workflow_control", output="No linter errors found."), _call(3, "file_edit", turn=2, path="a.py"), _call(4, "workflow_control", turn=2, output="No linter errors found."), _call(5, "file_edit", turn=3, path="a.py")]
+    clean_lints[1].raw_tool_name = clean_lints[3].raw_tool_name = "ReadLints"
+    assert not any(f.id == HEURISTIC_IDS[4] for f in evaluate_diagnostics(_session(clean_lints)))
+    other_paths_lint = [_call(1, "file_edit", path="a.py"), _call(2, "workflow_control", path="other.py", params={"paths": ["other.py"]}, output="line 1: error"), _call(3, "file_edit", turn=2, path="a.py"), _call(4, "workflow_control", turn=2, path="other.py", params={"paths": ["other.py"]}, output="line 1: error"), _call(5, "file_edit", turn=3, path="a.py")]
+    other_paths_lint[1].raw_tool_name = other_paths_lint[3].raw_tool_name = "ReadLints"
+    assert not any(f.id == HEURISTIC_IDS[4] for f in evaluate_diagnostics(_session(other_paths_lint)))
+    second_path_lint = [_call(1, "file_edit", path="src/a.py"), _call(2, "workflow_control", path="src/other.py", params={"paths": ["src/other.py", "src/a.py"]}, output="line 1: error"), _call(3, "file_edit", turn=2, path="src/a.py"), _call(4, "workflow_control", turn=2, path="src", params={"paths": ["src"]}, output="line 1: error"), _call(5, "file_edit", turn=3, path="src/a.py")]
+    second_path_lint[1].raw_tool_name = second_path_lint[3].raw_tool_name = "ReadLints"
+    assert any(f.id == HEURISTIC_IDS[4] for f in evaluate_diagnostics(_session(second_path_lint)))
     wrong_file = [_call(1, "file_edit", path="test.py"), _call(2, "shell_exec", error=True, params={"command": "pytest other.py"}), _call(3, "file_edit", turn=2, path="test.py"), _call(4, "shell_exec", turn=2, error=True, params={"command": "pytest other.py"}), _call(5, "file_edit", turn=3, path="test.py")]
     assert not any(f.id == HEURISTIC_IDS[4] for f in evaluate_diagnostics(_session(wrong_file)))
     for token in (TokenBreakdownIR(None, None, None, {"rules": {"tokens": 15001}}), TokenBreakdownIR(None, None, 75.0), TokenBreakdownIR(None, None, None)):
-        calls = [_call(1, "file_read", output_len=40000)] if token.context_usage_percent is None and not token.by_category else []
-        assert any(f.id == HEURISTIC_IDS[5] for f in evaluate_diagnostics(_session(calls, token=token)))
+        calls = [_call(1, "file_read", turn=2, output_len=40000)] if token.context_usage_percent is None and not token.by_category else []
+        h06 = next(f for f in evaluate_diagnostics(_session(calls, token=token)) if f.id == HEURISTIC_IDS[5])
+        if calls:
+            assert h06.turn_index == 2 and h06.bubble_id == "b2"
     friction = next(f for f in evaluate_diagnostics(_session([_call(1, "shell_exec", error=True)], thinking="blocked by " + "x" * 200)) if f.id == HEURISTIC_IDS[7])
+    mid_thinking = ("a" * 220) + " blocked by rules " + ("z" * 220)
+    mid_friction = next(f for f in evaluate_diagnostics(_session([], thinking=mid_thinking)) if f.id == HEURISTIC_IDS[7])
     blind = next(f for f in evaluate_diagnostics(_session([_call(1, "mcp_call", error=True, namespace="x")])) if f.id == HEURISTIC_IDS[1])
-    assert friction.severity == "medium" and len(friction.thinking_snippet or "") == 160 and len(blind.error_message or "") == 160
+    assert friction.severity == "medium" and friction.turn_index == 1 and friction.bubble_id == "b1" and len(friction.thinking_snippet or "") == 160 and len(blind.error_message or "") == 160
+    assert mid_friction.turn_index == 1 and mid_friction.bubble_id == "b1" and len(mid_friction.thinking_snippet or "") == 160 and "blocked by" in (mid_friction.thinking_snippet or "")
+    quoted_only = _session([], thinking='My focus is on markers like `"Blocked by preToolUse hook"` in code.')
+    assert not any(f.id == HEURISTIC_IDS[7] for f in evaluate_diagnostics(quoted_only))
 
 
 def test_h07_child_and_sequential_waves() -> None:
     child = SubagentSummaryIR("child", 1, None, None, None, "failed", None, 0, 0, 1, 0)
+    minor_err_child = SubagentSummaryIR("ok-child", 1, None, None, None, "completed", None, 1, 10, 1, 0)
+    half_err_child = SubagentSummaryIR("half-err-child", 1, None, None, None, "completed", None, 1, 4, 2, 0)
+    high_err_child = SubagentSummaryIR("high-err-child", 1, None, None, None, "completed", None, 1, 4, 3, 0)
     dispatch = _call(1, "subagent_dispatch", child="child", started=0, ended=5)
     wave = [_call(i, "subagent_dispatch", started=(i - 1) * 10, ended=(i - 1) * 10 + 5) for i in range(2, 5)]
-    findings = evaluate_diagnostics(_session([dispatch, *wave], subagents=[child]))
-    assert {f.finding_key for f in findings if f.id == HEURISTIC_IDS[6]} >= {"H07_SUBAGENT_DISPATCH_ANOMALY:sub:child", "H07_SUBAGENT_DISPATCH_ANOMALY:turn:1"}
+    findings = evaluate_diagnostics(_session([dispatch, *wave], subagents=[child, minor_err_child, half_err_child, high_err_child]))
+    h07_keys = {f.finding_key for f in findings if f.id == HEURISTIC_IDS[6]}
+    assert {"H07_SUBAGENT_DISPATCH_ANOMALY:sub:child", "H07_SUBAGENT_DISPATCH_ANOMALY:sub:high-err-child", "H07_SUBAGENT_DISPATCH_ANOMALY:turn:1"} <= h07_keys
+    assert "H07_SUBAGENT_DISPATCH_ANOMALY:sub:ok-child" not in h07_keys
+    assert "H07_SUBAGENT_DISPATCH_ANOMALY:sub:half-err-child" not in h07_keys
     parallel = [_call(i, "subagent_dispatch", started=0, ended=10) for i in range(1, 4)]
     for call in parallel:
         call.model_call_id = "batch"
     assert not any(f.finding_key.endswith(":turn:1") for f in evaluate_diagnostics(_session(parallel)))
     overlapping = [_call(i, "subagent_dispatch", started=i, ended=20) for i in range(1, 4)]
     assert not any(f.finding_key.endswith(":turn:1") for f in evaluate_diagnostics(_session(overlapping)))
-    assert [f.finding_key for f in findings] == [f.finding_key for f in evaluate_diagnostics(_session([dispatch, *wave], subagents=[child]))]
+    multi_step = [
+        _call(1, "subagent_dispatch", started=0, ended=5),
+        _call(2, "shell_exec", started=6, ended=8),
+        _call(3, "subagent_dispatch", started=10, ended=15),
+        _call(4, "file_read", started=16, ended=18),
+        _call(5, "subagent_dispatch", started=20, ended=25),
+    ]
+    assert not any(f.finding_key.endswith(":turn:1") for f in evaluate_diagnostics(_session(multi_step)))
+    alternating_roles = [
+        _call(1, "subagent_dispatch", started=0, ended=5, params={"name": "general-purpose", "subagentType": "custom"}),
+        _call(2, "subagent_dispatch", started=6, ended=10, params={"name": "cursor-task-reviewer", "subagentType": "custom"}),
+        _call(3, "subagent_dispatch", started=11, ended=15, params={"name": "general-purpose", "subagentType": "custom"}),
+        _call(4, "subagent_dispatch", started=16, ended=20, params={"name": "cursor-task-reviewer", "subagentType": "custom"}),
+    ]
+    assert not any(f.finding_key.endswith(":turn:1") for f in evaluate_diagnostics(_session(alternating_roles)))
+    heterogeneous_fanout = [
+        _call(1, "subagent_dispatch", started=0, ended=5, params={"subagent_type": "explore"}),
+        _call(2, "subagent_dispatch", started=6, ended=10, params={"subagent_type": "docs-researcher"}),
+        _call(3, "subagent_dispatch", started=11, ended=15, params={"subagent_type": "noether"}),
+    ]
+    assert any(f.finding_key.endswith(":turn:1") for f in evaluate_diagnostics(_session(heterogeneous_fanout)))
+    assert [f.finding_key for f in findings] == [f.finding_key for f in evaluate_diagnostics(_session([dispatch, *wave], subagents=[child, minor_err_child, half_err_child, high_err_child]))]
 
 
 def test_finding_keys_are_stable_for_all_heuristics() -> None:

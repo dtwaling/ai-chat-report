@@ -1,11 +1,16 @@
 import json
+from pathlib import Path
 import sqlite3
 
 import pytest
 
-from chat_report.adapters.cursor.adapter import CursorAdapter
+from chat_report.adapters.cursor.adapter import CursorAdapter, _customization_kind
 from chat_report.adapters.cursor import adapter as adapter_module
 from chat_report.adapters.cursor.store import (
+    _sqlite_ro_uri,
+    bubble_timestamps,
+    extract_thinking,
+    extract_token_breakdown,
     fetch_attribution,
     fetch_offloaded_content,
     open_ro,
@@ -225,3 +230,140 @@ def test_subagent_none_status_normalizes_to_completed(tmp_path):
     con.close()
     session = CursorAdapter().extract_session(session_id, ExtractOptions(state_db=state, tracking_db=tracking))
     assert session.subagents[0].status == "completed"
+
+
+def test_live_shaped_token_breakdown_and_usage_tree():
+    composer_data = {
+        "promptTokenBreakdown": {
+            "totalUsedTokens": 4500,
+            "maxTokens": 128000,
+            "categories": [
+                {"id": "system_prompt", "label": "System", "estimatedTokens": 1200, "characterCount": 4800},
+                {"id": "tools", "label": "Tools", "estimatedTokens": 800, "characterCount": 3200},
+            ],
+        },
+        "promptContextUsageTree": {
+            "schemaVersion": 2,
+            "nodes": [{"name": "system", "tokens": 1200}],
+        },
+    }
+    tb = extract_token_breakdown(composer_data)
+    assert tb.total_context_tokens_used == 4500
+    assert tb.context_token_limit == 128000
+    assert tb.by_category == {
+        "system_prompt": {"tokens": 1200, "chars": 4800},
+        "tools": {"tokens": 800, "chars": 3200},
+    }
+    assert tb.top_context_nodes == [{"name": "system", "tokens": 1200}]
+
+
+def test_json_string_thinking_deduplication_and_timestamps():
+    bubble = {
+        "thinking": '{"text": "unwrapped thought"}',
+        "allThinkingBlocks": [{"text": "unwrapped thought"}, '{"text": "second thought"}'],
+        "createdAt": "2026-01-01T00:00:01",
+        "thinkingDurationMs": 42.9,
+    }
+    blocks = extract_thinking("b-1", bubble)
+    assert [b.text for b in blocks] == ["unwrapped thought", "second thought"]
+    assert blocks[0].duration_ms == 42
+    assert blocks[0].started_at_ms == 1767225601000
+    assert bubble_timestamps({"createdAtMs": 1234.8}) == (1234, 1234)
+
+
+def test_legacy_created_at_only_does_not_synthesize_zero_elapsed_ms(tmp_path):
+    session_id = "0a7d3243-61b6-4b3a-8fc5-43c73e2db583"
+    state = create_synthetic_state_db(tmp_path / "state.vscdb", session_id=session_id, bubble_count=2)
+    tracking = create_synthetic_tracking_db(tmp_path / "tracking.db", session_id=session_id)
+    con = sqlite3.connect(state)
+    assistant_key = f"bubbleId:{session_id}:bubble-001"
+    assistant = json.loads(con.execute("SELECT value FROM cursorDiskKV WHERE key = ?", (assistant_key,)).fetchone()[0])
+    assistant.pop("startedAtMs", None)
+    assistant.pop("completedAtMs", None)
+    assistant["createdAt"] = "2026-01-01T00:00:05Z"
+    assistant["toolFormerData"] = {
+        "name": "run_terminal_command_v2",
+        "params": {"command": "echo hi"},
+        "result": {"output": "hi", "exitCode": 0},
+        "additionalData": {"status": "completed"},
+    }
+    con.execute("UPDATE cursorDiskKV SET value = ? WHERE key = ?", (json.dumps(assistant), assistant_key))
+    con.commit()
+    con.close()
+    session = CursorAdapter().extract_session(session_id, ExtractOptions(state_db=state, tracking_db=tracking))
+    call = session.turns[0].tool_calls[0]
+    assert call.started_at_ms == 1767225605000
+    assert call.completed_at_ms == 1767225605000
+    assert call.elapsed_ms is None
+    assert "_dispatch_status" not in call.input_params
+
+
+def test_open_ro_special_char_filenames_and_unc_uri(tmp_path):
+    special_dir = tmp_path / "dir #1 %20"
+    special_dir.mkdir()
+    state = create_synthetic_state_db(special_dir / "state #1.vscdb", bubble_count=2)
+    con = open_ro(state)
+    try:
+        assert con.execute("SELECT COUNT(*) FROM cursorDiskKV").fetchone()[0] > 0
+    finally:
+        con.close()
+    unc_uri = _sqlite_ro_uri(Path(r"\\server\share\dir #1\state.vscdb"))
+    assert unc_uri.startswith("file:////server/share/dir%20%231/state.vscdb?mode=ro")
+
+
+def test_subagent_info_extraction_and_customization_paths(tmp_path):
+    assert _customization_kind(".cursor/rules/my-rule.md") == "rule"
+    assert _customization_kind(r".cursor\hooks\guard.py") == "hook"
+    assert _customization_kind(r"C:\repo\skills\my-skill\SKILL.md") == "skill"
+    session_id = "0a7d3243-61b6-4b3a-8fc5-43c73e2db583"
+    state = create_synthetic_state_db(tmp_path / "state.vscdb", session_id=session_id, bubble_count=2)
+    tracking = create_synthetic_tracking_db(tmp_path / "tracking.db", session_id=session_id)
+    track_con = sqlite3.connect(tracking)
+    track_con.execute("INSERT INTO ai_code_hashes VALUES (?, ?, ?, ?)", ("req-win", session_id, "composer", "/C:/Users/dev/app.py"))
+    track_con.commit()
+    track_con.close()
+
+    con = sqlite3.connect(state)
+    parent = json.loads(con.execute("SELECT value FROM cursorDiskKV WHERE key = ?", (f"composerData:{session_id}",)).fetchone()[0])
+    parent["subagentComposerIds"] = ["CHILD-1"]
+    con.execute("UPDATE cursorDiskKV SET value = ? WHERE key = ?", (json.dumps(parent), f"composerData:{session_id}"))
+    assistant_key = f"bubbleId:{session_id}:bubble-001"
+    assistant = json.loads(con.execute("SELECT value FROM cursorDiskKV WHERE key = ?", (assistant_key,)).fetchone()[0])
+    assistant["toolFormerData"] = {
+        "name": "task_v2",
+        "params": {"subagent_type": "explore"},
+        "result": {"agentId": "child-1"},
+        "additionalData": {"status": "completed"},
+    }
+    con.execute("UPDATE cursorDiskKV SET value = ? WHERE key = ?", (json.dumps(assistant), assistant_key))
+    child_data = {
+        "name": "Child Subagent",
+        "createdAt": 10,
+        "lastUpdatedAt": 20,
+        "status": "completed",
+        "subagentTypeName": "unspecified",
+        "subagentInfo": {
+            "subagentType": 1,
+            "parentComposerId": session_id,
+            "subagentTypeName": "unspecified",
+        },
+    }
+    for cid in ("CHILD-1", "child-1"):
+        con.execute("INSERT OR REPLACE INTO cursorDiskKV VALUES (?, ?)", (f"composerData:{cid}", json.dumps(child_data)))
+        con.execute("INSERT OR REPLACE INTO cursorDiskKV VALUES (?, ?)", (f"bubbleId:{cid}:user", json.dumps({"type": 1, "text": "go"})))
+        con.execute("INSERT OR REPLACE INTO cursorDiskKV VALUES (?, ?)", (f"composerConvHeaders:{cid}:000000", json.dumps([{"bubbleId": "user", "type": 1}])))
+    con.commit()
+    con.close()
+
+    adapter = CursorAdapter()
+    parent_ir = adapter.extract_session(session_id, ExtractOptions(state_db=state, tracking_db=tracking))
+    assert "C:/Users/dev/app.py" in parent_ir.attribution.distinct_files_touched
+    assert len(parent_ir.subagents) == 1
+    assert parent_ir.subagents[0].subagent_type == "explore"
+    assert parent_ir.subagents[0].parent_turn_index == 1
+
+    child_ir = adapter.extract_session("CHILD-1", ExtractOptions(state_db=state, tracking_db=tracking))
+    assert child_ir.is_subagent is True
+    assert child_ir.parent_session_id == session_id
+    assert child_ir.subagent_type is None
+

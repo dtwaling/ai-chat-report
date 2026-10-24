@@ -153,3 +153,28 @@ def test_headers_without_is_subagent_use_composer_data_fallback():
     _put_composer_data(state_con, "child", isSubagent=True, parentComposerId="main")
     state_con.executemany("INSERT INTO composerHeaders VALUES (?, ?)", [("main", 1), ("child", 2)])
     assert [entry.session_id for entry in list_recent_sessions(state_con)] == ["main"]
+
+
+def test_list_recent_recognizes_subagent_info_in_v18_composer_data():
+    state_con = _state_connection()
+    _put_composer_data(state_con, "main", recency=10)
+    _put_composer_data(
+        state_con,
+        "child-v18",
+        recency=20,
+        isSubagent=False,
+        parentComposerId=None,
+        subagentTypeName="unspecified",
+        subagentInfo={
+            "subagentType": 1,
+            "parentComposerId": "main",
+            "subagentTypeName": "generalPurpose",
+        },
+    )
+    assert [entry.session_id for entry in list_recent_sessions(state_con)] == ["main"]
+    all_entries = list_recent_sessions(state_con, list_include_subagents=True)
+    assert [(e.session_id, e.is_subagent, e.subagent_type) for e in all_entries] == [
+        ("child-v18", True, "generalPurpose"),
+        ("main", False, None),
+    ]
+

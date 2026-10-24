@@ -14,7 +14,7 @@ Runtime requirement: Python 3.10+ standard library only (`pytest` is used for te
 | `chat_report/adapters/cursor/` | Cursor `3.26.16` (`_v: 18` `composerData`, `_v: 3` `bubbleId`, plus legacy `_v: 3..17`) read-only SQLite adapter (`paths.py`, `store.py`, `resolver.py`, `tool_map.py`, `hooks.py`, `adapter.py`). |
 | `chat_report/cli.py` | Unified command-line interface (`python -m chat_report`). |
 | `skills/chat-report/` | Cursor agent skill (`SKILL.md`) and self-contained launcher/bundler (`scripts/run.py`). |
-| `cursor/chat-report.py` | Backward-compatible CLI shim that forwards invocations to `chat_report.cli` and strips deprecated v1 flags (`--shape`, `--tools`) with a warning. |
+| `cursor/chat-report.py` | CLI forwarding shim that strips deprecated v1 flags (`--shape`, `--tools`) with a warning and forwards all supported v2.0 CLI arguments to `chat_report.cli`. |
 | `tests/` | Unit and end-to-end test suites (`tests/cursor/`, `tests/core/`, `tests/_fixtures.py`). |
 
 All SQLite connections open database files in read-only URI mode (`?mode=ro`).
@@ -23,7 +23,7 @@ All SQLite connections open database files in read-only URI mode (`?mode=ro`).
 
 ## CLI Usage
 
-Run from the repository root with `python -m chat_report` (or via the `python cursor/chat-report.py` shim):
+Run from the repository root with `python -m chat_report` (or via the `python cursor/chat-report.py` CLI forwarding shim, which strips deprecated `--shape` and `--tools` flags and forwards all supported v2.0 CLI arguments to `chat_report.cli`):
 
 ```powershell
 # Inspect the most recent main-thread session

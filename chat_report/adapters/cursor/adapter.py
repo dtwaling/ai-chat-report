@@ -49,11 +49,22 @@ from chat_report.core.ir import (
 
 
 def _int(value: Any) -> int | None:
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    return None
 
 
 def _text(value: Any) -> str:
     return value if isinstance(value, str) else ""
+
+
+def _clean_subagent_type(value: Any) -> str | None:
+    text = _text(value).strip()
+    if not text or text.lower() in ("unspecified", "unknown", "custom"):
+        return None
+    return text
 
 
 def _normalize_session_status(raw_status: Any, turns: list[TurnIR], dispatch_status: str | None = None) -> str:
@@ -94,14 +105,14 @@ def _append_unique(target: list[str], values: list[str]) -> None:
 
 def _customization_kind(path: str) -> str | None:
     normalized = path.replace("\\", "/").lower()
-    name = Path(path).name.lower()
-    if Path(normalized).name == "skill.md":
+    name = normalized.rsplit("/", 1)[-1]
+    if name == "skill.md":
         return "skill"
     if name in ("agents.md", "claude.md"):
         return "agent_doc"
-    if normalized.endswith((".mdc", ".cursorrules")) or "/.cursor/rules/" in normalized:
+    if normalized.endswith((".mdc", ".cursorrules")) or "/.cursor/rules/" in f"/{normalized}":
         return "rule"
-    if name == "hooks.json" or "/.cursor/hooks/" in normalized:
+    if name == "hooks.json" or "/.cursor/hooks/" in f"/{normalized}":
         return "hook"
     return None
 
@@ -327,8 +338,12 @@ class CursorAdapter:
                 start = min((t.started_at_ms for t in turns if t.started_at_ms is not None), default=None)
             if end is None:
                 end = max((t.completed_at_ms for t in turns if t.completed_at_ms is not None), default=None)
+            subagent_info = data.get("subagentInfo") if isinstance(data.get("subagentInfo"), dict) else {}
+            parent_session_id = _text(data.get("parentComposerId")) or _text(subagent_info.get("parentComposerId")) or None
+            is_subagent = bool(data.get("isSubagent")) or bool(parent_session_id) or bool(subagent_info)
+            subagent_type = _clean_subagent_type(data.get("subagentTypeName")) or _clean_subagent_type(subagent_info.get("subagentTypeName"))
             session = SessionIR("2.0", self.harness_name, detect_cursor_version(state_con, data), session_id, normalized,
-                _text(data.get("parentComposerId")) or None, bool(data.get("isSubagent")), _text(data.get("subagentTypeName")) or None,
+                parent_session_id, is_subagent, subagent_type,
                 _text(data.get("name")) or None, _text(data.get("unifiedMode")) or None, _normalize_session_status(data.get("status"), turns),
                 _text((data.get("modelConfig") or {}).get("modelName")) if isinstance(data.get("modelConfig"), dict) else None,
                 bool((data.get("modelConfig") or {}).get("maxMode")) if isinstance(data.get("modelConfig"), dict) and "maxMode" in data.get("modelConfig", {}) else None,
@@ -376,27 +391,45 @@ class CursorAdapter:
             turn.assistant_texts.append(_text(bubble.get("text")))
         tfd = bubble.get("toolFormerData")
         if isinstance(tfd, dict):
+            started_ms, completed_ms = bubble_timestamps(bubble)
+            has_real_span = _int(bubble.get("startedAtMs")) is not None and _int(bubble.get("completedAtMs")) is not None
             call = map_tool_call(tfd, call_index=call_index, turn_index=turn.turn_index, bubble_id=bubble_id,
-                started_at_ms=bubble_timestamps(bubble)[0], completed_at_ms=bubble_timestamps(bubble)[1], denial_markers=markers)
-            additional = tfd.get("additionalData")
-            if isinstance(additional, dict):
-                status = _text(additional.get("status")) or _text(additional.get("terminationReason"))
-                if status:
-                    call.input_params["_dispatch_status"] = status
+                started_at_ms=started_ms, completed_at_ms=completed_ms if has_real_span else None, denial_markers=markers)
+            if not has_real_span:
+                call.completed_at_ms = completed_ms
+            if call.canonical_kind == "subagent_dispatch":
+                additional = tfd.get("additionalData")
+                if isinstance(additional, dict):
+                    status = _text(additional.get("status")) or _text(additional.get("terminationReason"))
+                    if status:
+                        call.input_params["_dispatch_status"] = status
             turn.tool_calls.append(call)
 
     def _attach_subagents(self, session: SessionIR, data: dict[str, Any], options: ExtractOptions, visited_ids: set[str]) -> None:
         dispatch: dict[str, int] = {}
         for turn in session.turns:
             for call in turn.tool_calls:
-                if call.subagent_session_id and call.subagent_session_id not in dispatch:
-                    dispatch[call.subagent_session_id] = turn.turn_index
+                if call.subagent_session_id:
+                    norm_call_sub = normalize_session_id(call.subagent_session_id)
+                    if norm_call_sub not in dispatch:
+                        dispatch[norm_call_sub] = turn.turn_index
         ordered_ids: list[str] = []
-        for sub_id in list(data.get("subagentComposerIds") or []) + list(dispatch):
-            if isinstance(sub_id, str) and sub_id and sub_id not in ordered_ids and normalize_session_id(sub_id) not in visited_ids:
-                ordered_ids.append(sub_id)
+        seen_norm_ids: set[str] = set()
+        raw_sub_ids = list(data.get("subagentComposerIds") or []) + [
+            call.subagent_session_id
+            for turn in session.turns
+            for call in turn.tool_calls
+            if call.subagent_session_id
+        ]
+        for sub_id in raw_sub_ids:
+            if isinstance(sub_id, str) and sub_id:
+                norm_sub = normalize_session_id(sub_id)
+                if norm_sub not in seen_norm_ids and norm_sub not in visited_ids:
+                    seen_norm_ids.add(norm_sub)
+                    ordered_ids.append(sub_id)
         child_options = replace(options, include_subagents=False)
         for sub_id in ordered_ids:
+            norm_sub = normalize_session_id(sub_id)
             try:
                 child = self._extract(sub_id, child_options, None, visited_ids)
             except (StoreAccessError, LookupError):
@@ -406,11 +439,18 @@ class CursorAdapter:
                 })
                 continue
             reads = [call.target_path for turn in child.turns for call in turn.tool_calls if call.canonical_kind == "file_read" and not call.is_error and call.target_path]
-            dispatch_call = next((call for turn in session.turns for call in turn.tool_calls if call.subagent_session_id == sub_id), None)
+            dispatch_call = next((call for turn in session.turns for call in turn.tool_calls if call.subagent_session_id and normalize_session_id(call.subagent_session_id) == norm_sub), None)
             dispatch_status = None
+            resolved_sub_type = child.subagent_type
             if dispatch_call:
                 dispatch_status = _text(dispatch_call.input_params.get("_dispatch_status")) or None
-            session.subagents.append(SubagentSummaryIR(sub_id, dispatch.get(sub_id), child.subagent_type, child.title, child.model_name,
+                if not resolved_sub_type:
+                    for key in ("subagent_type", "name", "subagentType"):
+                        candidate = _clean_subagent_type(dispatch_call.input_params.get(key))
+                        if candidate:
+                            resolved_sub_type = candidate
+                            break
+            session.subagents.append(SubagentSummaryIR(sub_id, dispatch.get(norm_sub), resolved_sub_type, child.title, child.model_name,
                 _normalize_session_status(child.status, child.turns, dispatch_status), child.duration_ms, len(child.turns), sum(len(t.tool_calls) for t in child.turns),
                 sum(1 for t in child.turns for c in t.tool_calls if c.is_error), sum(1 for t in child.turns for c in t.tool_calls if c.is_denied),
                 [path for path in reads if _customization_kind(path) == "skill"],

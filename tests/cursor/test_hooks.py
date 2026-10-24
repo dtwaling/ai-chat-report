@@ -5,6 +5,7 @@ from chat_report.adapters.cursor.hooks import (
     FALLBACK_DENIAL_MARKERS,
     detect_denial,
     extract_hook_script_token,
+    extract_markers_from_hook_script,
     load_denial_markers,
     strip_jsonc_comments,
 )
@@ -70,3 +71,28 @@ def test_detect_denial_matches_markers_and_hook_context():
     denied, reason = detect_denial("The preToolUse hook blocked this operation.")
     assert denied is True
     assert reason is not None
+
+
+def test_extract_markers_skips_dict_keys_and_non_denial_single_tokens(tmp_path):
+    script = tmp_path / "guard.py"
+    script.write_text(
+        """
+payload = {
+    "permissionDecision": "deny",
+    "agent_message": "Operation denied by repo security policy",
+    "user_message": "some_long_identifier_token_without_spaces",
+    "reason": "custom_denied_token_identifier",
+}
+msg = blocked ? "Command blocked by ternary policy" : "ok"
+""",
+        encoding="utf-8",
+    )
+    markers = extract_markers_from_hook_script(script)
+    assert "Operation denied by repo security policy" in markers
+    assert "Command blocked by ternary policy" in markers
+    assert "custom_denied_token_identifier" in markers
+    assert "agent_message" not in markers
+    assert "user_message" not in markers
+    assert "permissionDecision" not in markers
+    assert "some_long_identifier_token_without_spaces" not in markers
+

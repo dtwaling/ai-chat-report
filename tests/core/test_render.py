@@ -290,3 +290,156 @@ def test_touched_customizations_use_best_priority_and_skip_workspace_active(tmp_
         {"kind": "skill", "path": "ignored/SKILL.md", "source": "workspace_active", "turn_index": None},
     ]
     assert _touched(report) == ["demo/SKILL.md", "AGENTS.md", "same.mdc", "hooks.json"]
+
+
+def test_validator_type_guards_and_distribution_cross_checks(tmp_path: Path) -> None:
+    report = _report(tmp_path)
+
+    non_str_finding_key = deepcopy(report)
+    non_str_finding_key["diagnostics"] = {
+        "total_findings": 1,
+        "by_severity": {"high": 1, "medium": 0, "low": 0, "info": 0},
+        "findings": [{
+            "id": "H01_UNREAD_ATTACHED_OR_MENTIONED_SKILL",
+            "finding_key": 12345,
+            "name": "Unread skill",
+            "severity": "high",
+            "turn_index": 1,
+            "bubble_id": "bubble-001",
+            "summary": "Read the skill first.",
+            "error_message": None,
+            "thinking_snippet": None,
+            "evidence": {},
+            "remediation_hint": "Read it.",
+        }],
+    }
+    with pytest.raises(ValueError, match="finding.finding_key must be a string"):
+        assert_v2_report_conforms(non_str_finding_key)
+
+    non_str_skills = deepcopy(report)
+    non_str_skills["aggregates"]["customization_summary"]["skills_read"] = [123]
+    with pytest.raises(ValueError, match="skills_read must be sorted distinct paths"):
+        assert_v2_report_conforms(non_str_skills)
+
+    mismatched_severity = deepcopy(report)
+    mismatched_severity["diagnostics"] = {
+        "total_findings": 1,
+        "by_severity": {"high": 0, "medium": 1, "low": 0, "info": 0},
+        "findings": [{
+            "id": "H01_UNREAD_ATTACHED_OR_MENTIONED_SKILL",
+            "finding_key": "H01_UNREAD_ATTACHED_OR_MENTIONED_SKILL:test",
+            "name": "Unread skill",
+            "severity": "high",
+            "turn_index": 1,
+            "bubble_id": "bubble-001",
+            "summary": "Read the skill first.",
+            "error_message": None,
+            "thinking_snippet": None,
+            "evidence": {},
+            "remediation_hint": "Read it.",
+        }],
+    }
+    with pytest.raises(ValueError, match="by_severity distribution mismatch"):
+        assert_v2_report_conforms(mismatched_severity)
+
+    mismatched_status = deepcopy(report)
+    mismatched_status["aggregates"]["status_counts"]["completed"] -= 1
+    mismatched_status["aggregates"]["status_counts"]["error"] += 1
+    with pytest.raises(ValueError, match="status counts distribution mismatch"):
+        assert_v2_report_conforms(mismatched_status)
+
+    mismatched_tool_elapsed = deepcopy(report)
+    mismatched_tool_elapsed["aggregates"]["timing"]["total_tool_elapsed_ms"] += 10
+    with pytest.raises(ValueError, match="total tool elapsed ms mismatch"):
+        assert_v2_report_conforms(mismatched_tool_elapsed)
+
+    mismatched_thinking_dur = deepcopy(report)
+    mismatched_thinking_dur["aggregates"]["total_thinking_duration_ms"] += 5
+    with pytest.raises(ValueError, match="total thinking duration mismatch"):
+        assert_v2_report_conforms(mismatched_thinking_dur)
+
+    mismatched_session_ms = deepcopy(report)
+    mismatched_session_ms["aggregates"]["timing"]["total_session_ms"] = 999999
+    with pytest.raises(ValueError, match="timing.total_session_ms mismatch"):
+        assert_v2_report_conforms(mismatched_session_ms)
+
+    with_subagent = deepcopy(report)
+    with_subagent["session"]["subagents"] = [{
+        "session_id": "child-1",
+        "parent_turn_index": 1,
+        "subagent_type": "explore",
+        "name": "explorer",
+        "model_name": "test-model",
+        "status": "completed",
+        "duration_ms": 10,
+        "turn_count": 1,
+        "tool_call_count": 1,
+        "error_count": 0,
+        "denial_count": 0,
+        "skills_read": [],
+        "rules_read": [],
+    }]
+    with_subagent["aggregates"]["customization_summary"]["subagents_spawned"] = 1
+    with_subagent["aggregates"]["subagent_rollup"] = {
+        "count": 1,
+        "by_type": {"generalPurpose": 1},
+        "by_status": {"completed": 1},
+        "total_tool_calls": 1,
+        "total_errors": 0,
+    }
+    with pytest.raises(ValueError, match="subagent rollup by_type mismatch"):
+        assert_v2_report_conforms(with_subagent)
+
+    bad_subagent_field = deepcopy(with_subagent)
+    bad_subagent_field["aggregates"]["subagent_rollup"]["by_type"] = {"explore": 1}
+    bad_subagent_field["session"]["subagents"][0]["skills_read"] = [42]
+    with pytest.raises(ValueError, match="subagent.skills_read must be a string list"):
+        assert_v2_report_conforms(bad_subagent_field)
+
+    session = classify_session(
+        CursorAdapter().extract_session(
+            report["session"]["session_id"],
+            ExtractOptions(state_db=tmp_path / "state.vscdb", tracking_db=tmp_path / "tracking.db"),
+        ),
+        tmp_path,
+    )
+    diff = build_diff_report(session, session)
+    diff["harness_version"] = "0.0.0-wrong"
+    with pytest.raises(ValueError, match="diff harness_version mismatch"):
+        assert_v2_report_conforms(diff)
+
+    aggregate = build_aggregate_report([session, session])
+    aggregate["sessions"][0]["attribution"]["distinct_files_touched"] = [999]
+    with pytest.raises(ValueError, match="attribution distinct files invalid"):
+        assert_v2_report_conforms(aggregate)
+
+
+def test_markdown_table_escaping_context_summary_and_tool_target_detail(tmp_path: Path) -> None:
+    report = _report(tmp_path)
+    report["session"]["token_breakdown"]["total_context_tokens_used"] = 12000
+    report["session"]["token_breakdown"]["context_token_limit"] = 200000
+    report["session"]["token_breakdown"]["context_usage_percent"] = 6.0
+    report["session"]["subagents"] = [{
+        "session_id": "sub|1\nid",
+        "parent_turn_index": 1,
+        "subagent_type": "type|pipe\nline",
+        "name": "child",
+        "model_name": "test-model",
+        "status": "completed",
+        "duration_ms": 50,
+        "turn_count": 1,
+        "tool_call_count": 1,
+        "error_count": 0,
+        "denial_count": 0,
+        "skills_read": ["skills/a|b/SKILL.md"],
+        "rules_read": [],
+    }]
+    report["turns"][0]["tool_calls"][0]["target_path"] = "src/target.py"
+    report["turns"][1]["tool_calls"][0]["target_path"] = None
+    report["turns"][1]["tool_calls"][0]["input_params"] = {"command": "pytest -q"}
+    markdown = render_single_session_md(report)
+    assert "- Context Usage: 12000 / 200000 tokens (6.0%)" in markdown
+    assert r"| type\|pipe line | `sub\|1 id` | 1 | 1 | 0 | skills/a\|b/SKILL.md | 50 |" in markdown
+    assert "- Tool: `edit_file_v2` [completed] 50 ms -> `src/target.py`" in markdown
+    assert "- Tool: `read_file_v2` [completed] 50 ms -> `pytest -q`" in markdown
+

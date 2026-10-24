@@ -172,7 +172,7 @@ def _load_module(path: Path) -> ModuleType:
 
 
 def test_skill_bundler_overlap_force_rollback_and_isolated_execution(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     repository = Path(__file__).parents[2]
     simulated = tmp_path / "sim_repo"
@@ -211,6 +211,27 @@ def test_skill_bundler_overlap_force_rollback_and_isolated_execution(
     with pytest.raises(OSError, match="simulated failure"):
         module.bundle_into(str(external), force=True)
     assert marker.read_text(encoding="utf-8") == "preserve"
+
+    calls = 0
+
+    def fail_second_and_rollback_replace(source: str | os.PathLike[str], destination: str | os.PathLike[str]) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("primary install failure")
+        if calls == 3:
+            raise OSError("rollback restore failure")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(module.os, "replace", fail_second_and_rollback_replace)
+    with pytest.raises(OSError, match="primary install failure"):
+        module.bundle_into(str(external), force=True)
+    err = capsys.readouterr().err
+    assert "WARNING: bundle rollback failed" in err
+    assert "rollback restore failure" in err
+    for leftover in external.parent.glob(f".{external.name}.bak.*"):
+        real_replace(leftover, external)
+
     state = create_synthetic_state_db(tmp_path / "state.vscdb")
     tracking = create_synthetic_tracking_db(tmp_path / "tracking.db")
     output = tmp_path / "outside"

@@ -4,12 +4,40 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlsplit
 
 from chat_report.core.adapter import StoreAccessError
 from chat_report.core.ir import AttributionIR, ThinkingIR, TokenBreakdownIR
+
+
+def _int_num(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    return None
+
+
+def _sqlite_ro_uri(db_path: Path) -> str:
+    raw_str = str(db_path)
+    if raw_str.startswith("\\\\"):
+        forward = raw_str.lstrip("\\").replace("\\", "/")
+        return f"file:////{quote(forward, safe='/:@')}?mode=ro"
+    abs_path = db_path.absolute()
+    abs_str = str(abs_path)
+    if abs_str.startswith("\\\\"):
+        forward = abs_str.lstrip("\\").replace("\\", "/")
+        return f"file:////{quote(forward, safe='/:@')}?mode=ro"
+    uri = abs_path.as_uri()
+    parsed = urlsplit(uri)
+    if parsed.netloc:
+        forward = f"{parsed.netloc}{parsed.path}"
+        return f"file:////{forward.lstrip('/')}?mode=ro"
+    return f"{uri}?mode=ro"
 
 
 def open_ro(path: Path) -> sqlite3.Connection:
@@ -19,7 +47,7 @@ def open_ro(path: Path) -> sqlite3.Connection:
         raise StoreAccessError(f"Cursor database is missing or unreadable: {db_path}")
     con: sqlite3.Connection | None = None
     try:
-        con = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+        con = sqlite3.connect(_sqlite_ro_uri(db_path), uri=True)
         con.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
         return con
     except sqlite3.Error as exc:
@@ -58,8 +86,8 @@ def fetch_ordered_headers(
         return [item for item in headers if isinstance(item, dict)]
     try:
         rows = con.execute(
-            "SELECT key, value FROM cursorDiskKV WHERE key LIKE ? ORDER BY key ASC",
-            (f"composerConvHeaders:{chat_id}:%",),
+            "SELECT key, value FROM cursorDiskKV WHERE key >= ? AND key < ? ORDER BY key ASC",
+            (f"composerConvHeaders:{chat_id}:", f"composerConvHeaders:{chat_id};"),
         ).fetchall()
     except sqlite3.Error:
         return []
@@ -72,13 +100,19 @@ def fetch_ordered_headers(
 
 
 def _created_at_ms(bubble: dict[str, Any]) -> int | None:
-    value = bubble.get("createdAtMs")
-    if isinstance(value, int) and not isinstance(value, bool):
+    value = _int_num(bubble.get("createdAtMs"))
+    if value is not None:
         return value
     raw = bubble.get("createdAt")
+    num_raw = _int_num(raw)
+    if num_raw is not None:
+        return num_raw
     if isinstance(raw, str):
         try:
-            return int(dt.datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp() * 1000)
+            parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=dt.timezone.utc)
+            return int(parsed.timestamp() * 1000)
         except ValueError:
             return None
     return None
@@ -87,10 +121,10 @@ def _created_at_ms(bubble: dict[str, Any]) -> int | None:
 def bubble_timestamps(bubble: dict[str, Any]) -> tuple[int | None, int | None]:
     """Return bubble start/end milliseconds, falling back to its ISO creation time."""
     created_at_ms = _created_at_ms(bubble)
-    started_at_ms = bubble.get("startedAtMs")
-    completed_at_ms = bubble.get("completedAtMs")
-    start = started_at_ms if isinstance(started_at_ms, int) and not isinstance(started_at_ms, bool) else created_at_ms
-    end = completed_at_ms if isinstance(completed_at_ms, int) and not isinstance(completed_at_ms, bool) else created_at_ms
+    started_at_ms = _int_num(bubble.get("startedAtMs"))
+    completed_at_ms = _int_num(bubble.get("completedAtMs"))
+    start = started_at_ms if started_at_ms is not None else created_at_ms
+    end = completed_at_ms if completed_at_ms is not None else created_at_ms
     return start, end
 
 
@@ -126,8 +160,8 @@ def order_bubbles(
 
 def fetch_bubbles(con: sqlite3.Connection, chat_id: str) -> dict[str, dict[str, Any]]:
     rows = con.execute(
-        "SELECT key, value FROM cursorDiskKV WHERE key LIKE ? ORDER BY key ASC",
-        (f"bubbleId:{chat_id}:%",),
+        "SELECT key, value FROM cursorDiskKV WHERE key >= ? AND key < ? ORDER BY key ASC",
+        (f"bubbleId:{chat_id}:", f"bubbleId:{chat_id};"),
     ).fetchall()
     prefix = f"bubbleId:{chat_id}:"
     result: dict[str, dict[str, Any]] = {}
@@ -141,6 +175,7 @@ def fetch_bubbles(con: sqlite3.Connection, chat_id: str) -> dict[str, dict[str, 
 
 def extract_thinking(bubble_id: str, bubble: dict[str, Any]) -> list[ThinkingIR]:
     blocks: list[ThinkingIR] = []
+    seen_texts: set[str] = set()
     thinking = bubble.get("thinking")
     candidates: list[Any] = [thinking] if thinking else []
     legacy = bubble.get("allThinkingBlocks")
@@ -148,13 +183,18 @@ def extract_thinking(bubble_id: str, bubble: dict[str, Any]) -> list[ThinkingIR]
         candidates.extend(legacy)
     elif legacy:
         candidates.append(legacy)
-    for candidate in candidates:
+    for raw_candidate in candidates:
+        candidate = decode_json(raw_candidate)
         text = candidate.get("text") if isinstance(candidate, dict) else candidate
         if isinstance(text, str) and text.strip():
+            cleaned = text.strip()
+            if cleaned in seen_texts:
+                continue
+            seen_texts.add(cleaned)
             started_at_ms, completed_at_ms = bubble_timestamps(bubble)
             blocks.append(ThinkingIR(
-                bubble_id=bubble_id, text=text.strip(),
-                duration_ms=bubble.get("thinkingDurationMs") if isinstance(bubble.get("thinkingDurationMs"), int) else None,
+                bubble_id=bubble_id, text=cleaned,
+                duration_ms=_int_num(bubble.get("thinkingDurationMs")),
                 started_at_ms=started_at_ms,
                 completed_at_ms=completed_at_ms,
             ))
@@ -165,27 +205,69 @@ def extract_token_counts(bubble: dict[str, Any]) -> tuple[int | None, int | None
     token_count = bubble.get("tokenCount")
     if isinstance(token_count, dict):
         inp, out = token_count.get("inputTokens"), token_count.get("outputTokens")
-        return (inp if isinstance(inp, int) else None, out if isinstance(out, int) else None)
+        return (_int_num(inp), _int_num(out))
     return (None, token_count) if isinstance(token_count, int) and not isinstance(token_count, bool) else (None, None)
 
 
 def extract_token_breakdown(composer_data: dict[str, Any]) -> TokenBreakdownIR:
     raw_categories = composer_data.get("promptTokenBreakdown")
     categories: dict[str, dict[str, int]] = {}
+    fallback_used: int | None = None
+    fallback_limit: int | None = None
     if isinstance(raw_categories, dict):
-        for name, raw in raw_categories.items():
-            if isinstance(raw, dict):
-                categories[str(name)] = {
-                    key: value for key, value in raw.items()
-                    if key in ("tokens", "chars") and isinstance(value, int) and not isinstance(value, bool)
-                }
+        fallback_used = _int_num(raw_categories.get("totalUsedTokens"))
+        fallback_limit = _int_num(raw_categories.get("maxTokens"))
+        cat_list = raw_categories.get("categories")
+        if isinstance(cat_list, list):
+            for item in cat_list:
+                if isinstance(item, dict):
+                    cid = item.get("id") or item.get("label")
+                    if isinstance(cid, str) and cid:
+                        tokens = _int_num(item.get("estimatedTokens"))
+                        if tokens is None:
+                            tokens = _int_num(item.get("tokens"))
+                        chars = _int_num(item.get("characterCount"))
+                        if chars is None:
+                            chars = _int_num(item.get("chars"))
+                        categories[cid] = {
+                            "tokens": tokens if tokens is not None else 0,
+                            "chars": chars if chars is not None else 0,
+                        }
+        else:
+            for name, raw in raw_categories.items():
+                if isinstance(raw, dict):
+                    entry: dict[str, int] = {}
+                    tokens = _int_num(raw.get("tokens"))
+                    if tokens is None:
+                        tokens = _int_num(raw.get("estimatedTokens"))
+                    chars = _int_num(raw.get("chars"))
+                    if chars is None:
+                        chars = _int_num(raw.get("characterCount"))
+                    if tokens is not None:
+                        entry["tokens"] = tokens
+                    if chars is not None:
+                        entry["chars"] = chars
+                    categories[str(name)] = entry
     tree = composer_data.get("promptContextUsageTree")
+    if isinstance(tree, list):
+        top_nodes = [node for node in tree if isinstance(node, dict)]
+    elif isinstance(tree, dict) and isinstance(tree.get("nodes"), list):
+        top_nodes = [node for node in tree["nodes"] if isinstance(node, dict)]
+    else:
+        top_nodes = []
+    total_used = _int_num(composer_data.get("contextTokensUsed"))
+    if total_used is None:
+        total_used = fallback_used
+    token_limit = _int_num(composer_data.get("contextTokenLimit"))
+    if token_limit is None:
+        token_limit = fallback_limit
+    usage_pct = composer_data.get("contextUsagePercent")
     return TokenBreakdownIR(
-        total_context_tokens_used=composer_data.get("contextTokensUsed") if isinstance(composer_data.get("contextTokensUsed"), int) else None,
-        context_token_limit=composer_data.get("contextTokenLimit") if isinstance(composer_data.get("contextTokenLimit"), int) else None,
-        context_usage_percent=float(composer_data["contextUsagePercent"]) if isinstance(composer_data.get("contextUsagePercent"), (int, float)) else None,
+        total_context_tokens_used=total_used,
+        context_token_limit=token_limit,
+        context_usage_percent=float(usage_pct) if isinstance(usage_pct, (int, float)) and not isinstance(usage_pct, bool) else None,
         by_category=categories,
-        top_context_nodes=tree if isinstance(tree, list) else [],
+        top_context_nodes=top_nodes,
     )
 
 
@@ -214,10 +296,14 @@ def fetch_attribution(
     columns = {str(row[1]) for row in track_con.execute("PRAGMA table_info(ai_code_hashes)").fetchall()}
     files: list[str] = []
     if "fileName" in columns:
-        files = [str(row[0]) for row in track_con.execute(
-            "SELECT DISTINCT fileName FROM ai_code_hashes WHERE conversationId = ? AND fileName IS NOT NULL ORDER BY fileName ASC",
-            (chat_id,),
-        ).fetchall()]
+        raw_files = [
+            re.sub(r"^/([A-Za-z]:/)", r"\1", str(row[0]).replace("\\", "/"))
+            for row in track_con.execute(
+                "SELECT DISTINCT fileName FROM ai_code_hashes WHERE conversationId = ? AND fileName IS NOT NULL ORDER BY fileName ASC",
+                (chat_id,),
+            ).fetchall()
+        ]
+        files = list(dict.fromkeys(raw_files))
     elif warnings is not None:
         warnings.append({"code": "cursor-tracking-filename-column-missing", "message": "ai_code_hashes has no fileName column; distinct_files_touched set to []."})
     commits: list[dict[str, Any]] = []

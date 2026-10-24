@@ -13,7 +13,7 @@ from chat_report.core.ir import CanonicalToolKind, ToolCallIR
 _TOOL_KINDS: dict[str, CanonicalToolKind] = {
     "read_file_v2": CanonicalToolKind.FILE_READ, "read_file": CanonicalToolKind.FILE_READ, "read": CanonicalToolKind.FILE_READ,
     "edit_file_v2": CanonicalToolKind.FILE_EDIT, "edit_file": CanonicalToolKind.FILE_EDIT, "search_replace": CanonicalToolKind.FILE_EDIT, "strreplace": CanonicalToolKind.FILE_EDIT, "apply_patch": CanonicalToolKind.FILE_EDIT,
-    "write_file_v2": CanonicalToolKind.FILE_WRITE, "write_file": CanonicalToolKind.FILE_WRITE, "create_file": CanonicalToolKind.FILE_WRITE, "edit_notebook": CanonicalToolKind.FILE_WRITE, "write": CanonicalToolKind.FILE_WRITE,
+    "write_file_v2": CanonicalToolKind.FILE_WRITE, "write_file": CanonicalToolKind.FILE_WRITE, "create_file": CanonicalToolKind.FILE_WRITE, "edit_notebook": CanonicalToolKind.FILE_WRITE, "editnotebook": CanonicalToolKind.FILE_WRITE, "write": CanonicalToolKind.FILE_WRITE,
     "delete_file_v2": CanonicalToolKind.FILE_DELETE, "delete_file": CanonicalToolKind.FILE_DELETE, "delete": CanonicalToolKind.FILE_DELETE,
     "ripgrep_raw_search": CanonicalToolKind.SEARCH_GREP, "grep_search": CanonicalToolKind.SEARCH_GREP, "rg": CanonicalToolKind.SEARCH_GREP, "grep": CanonicalToolKind.SEARCH_GREP,
     "glob_file_search": CanonicalToolKind.SEARCH_GLOB, "file_search": CanonicalToolKind.SEARCH_GLOB, "list_dir": CanonicalToolKind.SEARCH_GLOB, "list_dir_v2": CanonicalToolKind.SEARCH_GLOB, "glob": CanonicalToolKind.SEARCH_GLOB,
@@ -24,7 +24,7 @@ _TOOL_KINDS: dict[str, CanonicalToolKind] = {
     "get_mcp_tools": CanonicalToolKind.MCP_DISCOVERY, "getdynamictools": CanonicalToolKind.MCP_DISCOVERY,
     "fetch_mcp_resource": CanonicalToolKind.MCP_RESOURCE, "read_mcp_resource": CanonicalToolKind.MCP_RESOURCE, "fetchmcpresource": CanonicalToolKind.MCP_RESOURCE,
     "ask_question": CanonicalToolKind.USER_INTERACTION, "send_to_call": CanonicalToolKind.USER_INTERACTION, "askquestion": CanonicalToolKind.USER_INTERACTION, "sendtocall": CanonicalToolKind.USER_INTERACTION,
-    "create_plan": CanonicalToolKind.WORKFLOW_CONTROL, "switch_mode": CanonicalToolKind.WORKFLOW_CONTROL, "read_lints": CanonicalToolKind.WORKFLOW_CONTROL, "todo_write": CanonicalToolKind.WORKFLOW_CONTROL, "create_goal": CanonicalToolKind.WORKFLOW_CONTROL, "update_goal": CanonicalToolKind.WORKFLOW_CONTROL, "update_current_step": CanonicalToolKind.WORKFLOW_CONTROL, "switchmode": CanonicalToolKind.WORKFLOW_CONTROL, "readlints": CanonicalToolKind.WORKFLOW_CONTROL, "todowrite": CanonicalToolKind.WORKFLOW_CONTROL, "creategoal": CanonicalToolKind.WORKFLOW_CONTROL, "updategoal": CanonicalToolKind.WORKFLOW_CONTROL, "updatecurrentstep": CanonicalToolKind.WORKFLOW_CONTROL,
+    "create_plan": CanonicalToolKind.WORKFLOW_CONTROL, "createplan": CanonicalToolKind.WORKFLOW_CONTROL, "switch_mode": CanonicalToolKind.WORKFLOW_CONTROL, "read_lints": CanonicalToolKind.WORKFLOW_CONTROL, "todo_write": CanonicalToolKind.WORKFLOW_CONTROL, "create_goal": CanonicalToolKind.WORKFLOW_CONTROL, "update_goal": CanonicalToolKind.WORKFLOW_CONTROL, "update_current_step": CanonicalToolKind.WORKFLOW_CONTROL, "switchmode": CanonicalToolKind.WORKFLOW_CONTROL, "readlints": CanonicalToolKind.WORKFLOW_CONTROL, "todowrite": CanonicalToolKind.WORKFLOW_CONTROL, "creategoal": CanonicalToolKind.WORKFLOW_CONTROL, "updategoal": CanonicalToolKind.WORKFLOW_CONTROL, "updatecurrentstep": CanonicalToolKind.WORKFLOW_CONTROL,
     "web_fetch": CanonicalToolKind.WEB_ACCESS, "web_search": CanonicalToolKind.WEB_ACCESS, "generate_image": CanonicalToolKind.WEB_ACCESS, "webfetch": CanonicalToolKind.WEB_ACCESS, "websearch": CanonicalToolKind.WEB_ACCESS, "generateimage": CanonicalToolKind.WEB_ACCESS,
 }
 KNOWN_MCP_SERVER_PREFIXES: tuple[str, ...] = (
@@ -119,6 +119,32 @@ def _first_str(data: dict[str, Any], keys: tuple[str, ...]) -> str | None:
     return None
 
 
+def _is_structured_denial_payload(unwrapped_result: Any, result_text: str, kind: CanonicalToolKind) -> tuple[bool, str | None]:
+    if kind in (CanonicalToolKind.FILE_READ, CanonicalToolKind.SEARCH_GREP, CanonicalToolKind.SEARCH_GLOB):
+        return False, None
+    prefixes = ("Blocked by preToolUse hook", "Auto-review blocked")
+    if isinstance(unwrapped_result, dict):
+        if unwrapped_result.get("permissionDecision") == "deny":
+            reason = _first_str(unwrapped_result, ("reason", "message", "agent_message", "error")) or '"permissionDecision":"deny"'
+            return True, reason[:160]
+        hook_out = unwrapped_result.get("hookSpecificOutput")
+        if isinstance(hook_out, dict) and hook_out.get("permissionDecision") == "deny":
+            reason = _first_str(hook_out, ("reason", "message", "agent_message")) or '"permissionDecision":"deny"'
+            return True, reason[:160]
+        for key in ("output", "error", "message", "content"):
+            val = unwrapped_result.get(key)
+            if isinstance(val, str):
+                stripped = val.lstrip()
+                for prefix in prefixes:
+                    if stripped.startswith(prefix):
+                        return True, prefix
+    stripped_text = result_text.lstrip()
+    for prefix in prefixes:
+        if stripped_text.startswith(prefix):
+            return True, prefix
+    if stripped_text.startswith(('{"permissionDecision":"deny"', '{"permissionDecision": "deny"')):
+        return True, '"permissionDecision":"deny"'
+    return False, None
 def _error_text(value: Any) -> str:
     if value is None:
         return ""
@@ -178,6 +204,8 @@ def map_tool_call(
     tfd = tool_former_data if isinstance(tool_former_data, dict) else {}
     raw_name = str(tfd.get("name") or "")
     params = _as_dict(tfd.get("params"))
+    if not params:
+        params = _as_dict(tfd.get("rawArgs"))
     result_raw = tfd.get("result")
     result = _as_dict(result_raw)
     namespace, mcp_tool = parse_mcp_raw_name(raw_name)
@@ -215,8 +243,31 @@ def map_tool_call(
     if via_dynamic:
         params["via_dynamic_tool"] = True
     if kind is CanonicalToolKind.MCP_DISCOVERY:
+        namespace = namespace or _first_str(params, ("namespace", "server"))
+        mcp_tool = mcp_tool or _first_str(params, ("toolName", "tool_name", "name"))
         params["_discovered_tools"] = _discovered_tools(result_raw, params)
-    target = _first_str(params, ("relativeWorkspacePath", "targetFile", "path", "effectiveUri", "targetDirectory"))
+    target = _first_str(
+        params,
+        (
+            "relativeWorkspacePath",
+            "targetFile",
+            "target_file",
+            "filePath",
+            "file_path",
+            "target_notebook",
+            "targetNotebook",
+            "path",
+            "effectiveUri",
+            "targetDirectory",
+            "target_directory",
+            "working_directory",
+            "workingDirectory",
+        ),
+    )
+    if target is None:
+        paths_val = params.get("paths")
+        if isinstance(paths_val, list) and paths_val and isinstance(paths_val[0], str) and paths_val[0]:
+            target = paths_val[0]
     result_text = _error_text(unwrapped_result)
     raw_status = str(tfd.get("status") or "").lower()
     error_value = tfd.get("error")
@@ -236,25 +287,34 @@ def map_tool_call(
         and isinstance(unwrapped_result, dict)
         and "contents" in unwrapped_result
     )
-    denial_eligible = (
+    has_error_indicator = (
         raw_status in ("error", "failed")
         or bool(error_value)
         or has_nonzero_exit
         or has_result_error
         or error_prefix
-        or len(result_text) <= 400
     )
+    is_clean_completed = raw_status in ("completed", "") and not has_error_indicator and explicit_rejected is not True
+    structured_hit, structured_reason = (
+        _is_structured_denial_payload(unwrapped_result, result_text, kind)
+        if explicit_rejected is None and len(result_text) <= 400
+        else (False, None)
+    )
+    denial_eligible = has_error_indicator or structured_hit
     if explicit_rejected is True:
         is_denied, denial_reason = True, (
             _first_str(unwrapped_result, ("output", "error", "message")) or "rejected"
         )[:160]
     elif is_completed_file_read or not denial_eligible or (explicit_rejected is False and len(result_text) > 400):
         is_denied, denial_reason = False, None
+    elif is_clean_completed:
+        is_denied, denial_reason = structured_hit, structured_reason
     else:
         scan_text = result_text[:400] if len(result_text) > 400 and raw_status in ("completed", "") else result_text
         is_denied, denial_reason = detect_denial(scan_text, denial_markers) if denial_markers else detect_denial(scan_text)
     if is_denied or str(tfd.get("userDecision") or "").lower() == "rejected":
-        status, is_error, error_message = "denied", True, denial_reason or "rejected by user"
+        denial_reason = denial_reason or "rejected by user"
+        status, is_error, error_message = "denied", True, denial_reason
     elif raw_status in ("cancelled", "canceled", "aborted"):
         status, is_error, error_message = "cancelled", False, None
     elif raw_status == "loading":
@@ -265,10 +325,12 @@ def map_tool_call(
     else:
         status, is_error, error_message = "completed", False, None
     elapsed = completed_at_ms - started_at_ms if isinstance(started_at_ms, int) and isinstance(completed_at_ms, int) and completed_at_ms >= started_at_ms else None
-    additional = _as_dict(tfd.get("additionalData"))
-    subagent_id = _first_str(additional, ("subagentComposerId",))
-    if not subagent_id:
-        subagent_id = _first_str(result, ("agentId",))
+    subagent_id: str | None = None
+    if kind is CanonicalToolKind.SUBAGENT_DISPATCH:
+        additional = _as_dict(tfd.get("additionalData"))
+        subagent_id = _first_str(additional, ("subagentComposerId",))
+        if not subagent_id:
+            subagent_id = _first_str(result, ("agentId",))
     return ToolCallIR(
         call_index=call_index, turn_index=turn_index, bubble_id=bubble_id,
         tool_call_id=_first_str(tfd, ("toolCallId",)), model_call_id=_first_str(tfd, ("modelCallId",)),
