@@ -8,14 +8,14 @@ Runtime requirement: Python 3.10+ standard library only (`pytest` is used for te
 
 ## Architecture and Repository Layout
 
-| Path | Responsibility |
-|------|----------------|
-| `chat_report/core/` | Harness-agnostic intermediate representation (`ir.py`), adapter protocol and registry (`adapter.py`), semantic tool classifier (`classifier.py`), deterministic heuristics (`diagnostics.py`), comparison engine (`compare.py`), and renderers (`render/json_v2.py`, `render/markdown.py`, `render/digest.py`). |
-| `chat_report/adapters/cursor/` | Cursor `3.26.16` (`_v: 18` `composerData`, `_v: 3` `bubbleId`, plus legacy `_v: 3..17`) read-only SQLite adapter (`paths.py`, `store.py`, `resolver.py`, `tool_map.py`, `hooks.py`, `adapter.py`). |
-| `chat_report/cli.py` | Unified command-line interface (`python -m chat_report`). |
-| `skills/chat-report/` | Cursor agent skill (`SKILL.md`) and self-contained launcher/bundler (`scripts/run.py`). |
-| `cursor/chat-report.py` | CLI forwarding shim that strips deprecated v1 flags (`--shape`, `--tools`) with a warning and forwards all supported v2.0 CLI arguments to `chat_report.cli`. |
-| `tests/` | Unit and end-to-end test suites (`tests/cursor/`, `tests/core/`, `tests/_fixtures.py`). |
+| Path                           | Responsibility                                                                                                                                                                                                                                                                                                  |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `chat_report/core/`            | Harness-agnostic intermediate representation (`ir.py`), adapter protocol and registry (`adapter.py`), semantic tool classifier (`classifier.py`), deterministic heuristics (`diagnostics.py`), comparison engine (`compare.py`), and renderers (`render/json_v2.py`, `render/markdown.py`, `render/digest.py`). |
+| `chat_report/adapters/cursor/` | Cursor `3.26.16` (`_v: 18` `composerData`, `_v: 3` `bubbleId`, plus legacy `_v: 3..17`) read-only SQLite adapter (`paths.py`, `store.py`, `resolver.py`, `tool_map.py`, `hooks.py`, `adapter.py`).                                                                                                              |
+| `chat_report/cli.py`           | Unified command-line interface (`python -m chat_report`).                                                                                                                                                                                                                                                       |
+| `skills/chat-report/`          | Cursor agent skill (`SKILL.md`) and self-contained launcher/bundler (`scripts/run.py`).                                                                                                                                                                                                                         |
+| `cursor/chat-report.py`        | CLI forwarding shim that strips deprecated v1 flags (`--shape`, `--tools`) with a warning and forwards all supported v2.0 CLI arguments to `chat_report.cli`.                                                                                                                                                   |
+| `tests/`                       | Unit and end-to-end test suites (`tests/cursor/`, `tests/core/`, `tests/_fixtures.py`).                                                                                                                                                                                                                         |
 
 All SQLite connections open database files in read-only URI mode (`?mode=ro`).
 
@@ -50,42 +50,42 @@ python -m chat_report --validate path/to/report.json
 
 ### Modes (Mutually Exclusive)
 
-| Mode | Description |
-|------|-------------|
-| `<uuid>` | Extract a single session by chat ID or request ID. |
-| `--latest` | Extract the most recent main-thread session (`isSubagent == 0`). |
-| `--list-recent [N]` | Print recent sessions (default `10`) as tab-separated rows. |
-| `--diff <a> <b>` | Compare session `<a>` (before) and session `<b>` (after). |
-| `--aggregate <id1> <id2> ...` | Aggregate `>= 2` sessions into a cohort rollup report. |
-| `--validate <json_path>` | Validate an existing JSON report against the v2.0 contract. |
+| Mode                          | Description                                                      |
+| ----------------------------- | ---------------------------------------------------------------- |
+| `<uuid>`                      | Extract a single session by chat ID or request ID.               |
+| `--latest`                    | Extract the most recent main-thread session (`isSubagent == 0`). |
+| `--list-recent [N]`           | Print recent sessions (default `10`) as tab-separated rows.      |
+| `--diff <a> <b>`              | Compare session `<a>` (before) and session `<b>` (after).        |
+| `--aggregate <id1> <id2> ...` | Aggregate `>= 2` sessions into a cohort rollup report.           |
+| `--validate <json_path>`      | Validate an existing JSON report against the v2.0 contract.      |
 
 ### Operational Flags
 
-| Flag | Description |
-|------|-------------|
-| `--harness cursor` | Select the harness adapter (default: `cursor`). |
-| `--out <dir>` | Output directory for generated reports (default: `.cursor/local/chat-reports`). |
-| `--format {md,json,both}` | Report output format (default: `both`). |
-| `--agent-digest` | Print a bounded Stage 1 digest (`<= 2500` chars) to stdout and force `both` output formats. Supported with `<uuid>` and `--latest`. |
-| `--request-id` | Force UUID resolution through `ai_code_hashes.requestId` and `bubbleId` request ID scan. |
-| `--chat-id` | Force UUID resolution against `composerData:<uuid>` chat IDs only. |
-| `--workspace <dir>` | Workspace directory for `.cursor/hooks.json` discovery, path canonicalization, and active customization scanning (default: current working directory). |
-| `--no-subagents` | Skip child subagent session extraction. |
-| `--list-include-subagents` | Include child subagent sessions when running `--list-recent`. |
-| `--include-orphans` | Include unreferenced `bubbleId:<chatId>:*` rows omitted from conversation headers. |
-| `--state-db <path>` | Explicit path to Cursor `state.vscdb`. |
-| `--tracking-db <path>` | Explicit path to Cursor `ai-code-tracking.db`. |
-| `--denial-marker <str>` | Repeatable custom hook or harness denial substring marker. |
-| `--verbose` | Enable verbose diagnostic output. |
-| `-V`, `--version` | Print the package and schema version (`chat-report 2.0.1 (schema 2.0)`) and exit. |
+| Flag                       | Description                                                                                                                                            |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `--harness cursor`         | Select the harness adapter (default: `cursor`).                                                                                                        |
+| `--out <dir>`              | Output directory for generated reports (default: `.cursor/local/chat-reports`).                                                                        |
+| `--format {md,json,both}`  | Report output format (default: `both`).                                                                                                                |
+| `--agent-digest`           | Print a bounded Stage 1 digest (`<= 2500` chars) to stdout and force `both` output formats. Supported with `<uuid>` and `--latest`.                    |
+| `--request-id`             | Force UUID resolution through `ai_code_hashes.requestId` and `bubbleId` request ID scan.                                                               |
+| `--chat-id`                | Force UUID resolution against `composerData:<uuid>` chat IDs only.                                                                                     |
+| `--workspace <dir>`        | Workspace directory for `.cursor/hooks.json` discovery, path canonicalization, and active customization scanning (default: current working directory). |
+| `--no-subagents`           | Skip child subagent session extraction.                                                                                                                |
+| `--list-include-subagents` | Include child subagent sessions when running `--list-recent`.                                                                                          |
+| `--include-orphans`        | Include unreferenced `bubbleId:<chatId>:*` rows omitted from conversation headers.                                                                     |
+| `--state-db <path>`        | Explicit path to Cursor `state.vscdb`.                                                                                                                 |
+| `--tracking-db <path>`     | Explicit path to Cursor `ai-code-tracking.db`.                                                                                                         |
+| `--denial-marker <str>`    | Repeatable custom hook or harness denial substring marker.                                                                                             |
+| `--verbose`                | Enable verbose diagnostic output.                                                                                                                      |
+| `-V`, `--version`          | Print the package and schema version (`chat-report 2.0.2 (schema 2.0)`) and exit.                                                                      |
 
 ### Environment Variables
 
-| Variable | Purpose |
-|----------|---------|
-| `CURSOR_STATE_DB` | Override the default OS path to `state.vscdb` when `--state-db` is not passed. |
-| `CURSOR_TRACKING_DB` | Override the default OS path to `ai-code-tracking.db` when `--tracking-db` is not passed. |
-| `CURSOR_PRODUCT_JSON` | Override the path to Cursor `product.json` for version detection fallback. |
+| Variable              | Purpose                                                                                   |
+| --------------------- | ----------------------------------------------------------------------------------------- |
+| `CURSOR_STATE_DB`     | Override the default OS path to `state.vscdb` when `--state-db` is not passed.            |
+| `CURSOR_TRACKING_DB`  | Override the default OS path to `ai-code-tracking.db` when `--tracking-db` is not passed. |
+| `CURSOR_PRODUCT_JSON` | Override the path to Cursor `product.json` for version detection fallback.                |
 
 Exit codes: `0` on success, `1` on runtime, storage, or validation error, and `2` on CLI usage error.
 
@@ -102,11 +102,11 @@ Every JSON report shares the v2.0 top-level envelope:
 - `harness_version`: detected Cursor version string (or `"mixed"` when compared sessions differ)
 - `warnings`: list of `{"code": str, "message": str}` diagnostic warnings
 
-| `report_kind` | Output Filename Pattern | Top-Level Payload Keys |
-|---------------|-------------------------|------------------------|
-| `single-session` | `<session_id>.json` / `.md` | `session`, `aggregates`, `diagnostics`, `turns` |
-| `diff` | `diff-<before[:12]>-vs-<after[:12]>.json` / `.md` | `before`, `after`, `delta` |
-| `aggregate` | `aggregate-<YYYYMMDDTHHMMSS_ffffffZ>-<cohort_hash8>[-<seq>].json` / `.md` | `session_count`, `sessions`, `rollup` |
+| `report_kind`    | Output Filename Pattern                                                   | Top-Level Payload Keys                          |
+| ---------------- | ------------------------------------------------------------------------- | ----------------------------------------------- |
+| `single-session` | `<session_id>.json` / `.md`                                               | `session`, `aggregates`, `diagnostics`, `turns` |
+| `diff`           | `diff-<before[:12]>-vs-<after[:12]>.json` / `.md`                         | `before`, `after`, `delta`                      |
+| `aggregate`      | `aggregate-<YYYYMMDDTHHMMSS_ffffffZ>-<cohort_hash8>[-<seq>].json` / `.md` | `session_count`, `sessions`, `rollup`           |
 
 Offline validation (`--validate <json_path>`) enforces all structural keys, status sets, call-index ordering, and arithmetic invariants across `single-session`, `diff`, and `aggregate` reports.
 
@@ -114,16 +114,16 @@ Offline validation (`--validate <json_path>`) enforces all structural keys, stat
 
 ## Deterministic Diagnostic Heuristics (`H01` through `H08`)
 
-| Heuristic ID | Severity | Condition Detected |
-|--------------|----------|--------------------|
-| `H01_UNREAD_ATTACHED_OR_MENTIONED_SKILL` | `high` | A skill is attached, mentioned by the user or thinking trace, or matched by attached-skill domain activity without a corresponding `SKILL.md` read in the parent or child subagent sessions. |
-| `H02_BLIND_DYNAMIC_TOOL_CALL` | `medium` | An external MCP tool is called without prior `mcp_discovery` (`GetDynamicTools`) or fails with schema/parameter validation errors. |
-| `H03_TOOL_RETRY_THRASH` | `high` | Three or more consecutive or same-turn failing/denied tool calls on the same target path, MCP tool, or canonical tool kind (Branch 4a), or three or more identical empty `search_grep`/`search_glob` queries (Branch 4b). |
-| `H04_HOOK_OR_HARNESS_DENIAL` | `high` | A tool call is blocked or rejected by a workspace hook or harness policy (`is_denied == True`). |
-| `H05_EDIT_LINT_THRASH` | `medium` | A file is edited three or more times across two or more turns with intervening lint checks or failing test/typecheck commands across at least two edit intervals. |
-| `H06_PROMPT_OR_TOOL_TOKEN_SPIKE` | `medium` | Combined rules and skills exceed `15,000` tokens, context usage reaches `>= 75.0%`, or any tool call output reaches `>= 40,000` characters. |
-| `H07_SUBAGENT_DISPATCH_ANOMALY` | `medium` | A child subagent finishes with non-completed status or tool errors, or a turn dispatches three or more subagents sequentially across separate execution waves instead of parallel batching. |
-| `H08_INSTRUCTION_FRICTION_SIGNAL` | `medium` / `info` | Thinking blocks contain conflict phrases indicating competing rules, skills, or harness restrictions (`medium` when the turn also has a tool error or denial, otherwise `info`). |
+| Heuristic ID                             | Severity          | Condition Detected                                                                                                                                                                                                        |
+| ---------------------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `H01_UNREAD_ATTACHED_OR_MENTIONED_SKILL` | `high`            | A skill is attached, mentioned by the user or thinking trace, or matched by attached-skill domain activity without a corresponding `SKILL.md` read in the parent or child subagent sessions.                              |
+| `H02_BLIND_DYNAMIC_TOOL_CALL`            | `medium`          | An external MCP tool is called without prior `mcp_discovery` (`GetDynamicTools`) or fails with schema/parameter validation errors.                                                                                        |
+| `H03_TOOL_RETRY_THRASH`                  | `high`            | Three or more consecutive or same-turn failing/denied tool calls on the same target path, MCP tool, or canonical tool kind (Branch 4a), or three or more identical empty `search_grep`/`search_glob` queries (Branch 4b). |
+| `H04_HOOK_OR_HARNESS_DENIAL`             | `high`            | A tool call is blocked or rejected by a workspace hook or harness policy (`is_denied == True`).                                                                                                                           |
+| `H05_EDIT_LINT_THRASH`                   | `medium`          | A file is edited three or more times across two or more turns with intervening lint checks or failing test/typecheck commands across at least two edit intervals.                                                         |
+| `H06_PROMPT_OR_TOOL_TOKEN_SPIKE`         | `medium`          | Combined rules and skills exceed `15,000` tokens, context usage reaches `>= 75.0%`, or any tool call output reaches `>= 40,000` characters.                                                                               |
+| `H07_SUBAGENT_DISPATCH_ANOMALY`          | `medium`          | A child subagent finishes with non-completed status or tool errors, or a turn dispatches three or more subagents sequentially across separate execution waves instead of parallel batching.                               |
+| `H08_INSTRUCTION_FRICTION_SIGNAL`        | `medium` / `info` | Thinking blocks contain conflict phrases indicating competing rules, skills, or harness restrictions (`medium` when the turn also has a tool error or denial, otherwise `info`).                                          |
 
 ---
 
@@ -134,24 +134,50 @@ The `skills/chat-report/SKILL.md` skill implements a two-stage token-bounded wor
 1. **Stage 1 (Deterministic CLI + Digest):** Run `python "<skill_dir>/scripts/run.py" --latest --agent-digest` in a single shell call. If Stage 1 reports zero `HIGH`/`MEDIUM` findings and zero `H08` friction signals, and the user did not ask why a customization or tool failed or request a deep root-cause audit, return the summary and report link immediately with zero subagent dispatches.
 2. **Stage 2 (Conditional Subagent Dispatch):** When `H01` through `H08` findings fire or the user asks why a skill, rule, hook, or tool failed or was ignored, dispatch the `Customization & Harness Conflict Auditor` subagent with the generated `<session_id>.json` report and touched customization files to produce a structured Root Cause, Conflicting Directives, and Proposed Diff report. An optional `Onboarding Walkthrough Coach` subagent is available when the user requests an educational walkthrough.
 
-### Installing a Self-Contained Skill Bundle
+### Installing Globally or Bundling a Portable Skill
 
-Package `SKILL.md`, `scripts/run.py`, and the complete `chat_report` runtime into a standalone skill directory:
+`chat_report` supports three installation modes:
 
-```powershell
-python skills/chat-report/scripts/run.py --bundle-into <dest_skill_dir> [--force | -f]
-python -m chat_report --bundle-into <dest_skill_dir> [--force | -f]
-```
+1. **Global CLI + Lightweight Skill (`--install`):**
+   Installs the standalone runtime into the OS user data directory (`%LOCALAPPDATA%\chat-report` on Windows, `~/.local/share/chat-report` on POSIX), writes `chat-report.cmd` and `chat-report` launcher shims into `--bin-dir` (default `~/.local/bin`, or e.g. `C:\cmd`), and installs a lightweight `SKILL.md` (which invokes `chat-report` directly without a bundled `scripts/` copy) into User scope (`~/.cursor/skills/chat-report/SKILL.md`) by default, or Workspace scope (`<workspace>/.cursor/skills/chat-report/SKILL.md`) when `--workspace <dir>` is passed:
 
-The bundler accepts `--bundle-into <dest>` or `--bundle-into=<dest>`, plus `--force` / `-f` (as a bare flag, with an explicit boolean value such as `--force=true` or `--force true`, or as a trailing boolean argument). It stages files into a sibling temporary directory and swaps the destination atomically with automatic rollback on failure.
+   ```powershell
+   # Install runtime, shims in C:\cmd, and lightweight User-scope skill
+   python -m chat_report --install --bin-dir C:\cmd --force
+
+   # Or install via pipx / uv tool / pip (using pyproject.toml) and drop the lightweight skill
+   uv tool install .
+   chat-report --install-skill --force
+   ```
+
+2. **Lightweight Skill Only (`--install-skill`):**
+   Writes or refreshes only the lightweight `SKILL.md` (calling `chat-report`) into User scope by default or Workspace scope when `--workspace <dir>` is supplied:
+
+   ```powershell
+   # Default User scope (~/.cursor/skills/chat-report/SKILL.md)
+   python -m chat_report --install-skill [--force]
+
+   # Workspace scope (<workspace>/.cursor/skills/chat-report/SKILL.md)
+   python -m chat_report --install-skill --workspace <workspace_dir> [--force]
+   ```
+
+3. **Self-Contained Portable Skill Bundle (`--bundle-into`):**
+   Packages `SKILL.md`, `scripts/run.py`, and the complete `chat_report` runtime into a single portable skill directory for repositories that vendor the skill without a global CLI install:
+
+   ```powershell
+   python skills/chat-report/scripts/run.py --bundle-into <dest_skill_dir> [--force | -f]
+   python -m chat_report --bundle-into <dest_skill_dir> [--force | -f]
+   ```
+
+All three modes stage files into sibling temporary directories and swap targets atomically with automatic rollback on failure.
 
 ---
 
 ## Versioning and Release Policy
 
-- **Package version (`chat_report.__version__`):** Uses Semantic Versioning (`MAJOR.MINOR.PATCH`, currently `2.0.1`). Run `python -m chat_report --version` (or `-V`) to inspect the installed package and schema version.
+- **Package version (`chat_report.__version__`):** Uses Semantic Versioning (`MAJOR.MINOR.PATCH`, currently `2.0.2`). Run `python -m chat_report --version` (or `-V`) to inspect the installed package and schema version.
 - **Report contract version (`SCHEMA_VERSION` / `schema_version`):** Currently `"2.0"`, enforced offline by `python -m chat_report --validate <report.json>`. Breaking changes to report structure, field types, or arithmetic invariants increment the schema version. Backward-compatible bug fixes and internal adapter refinements increment the package minor or patch version.
-- **Git release tags:** Annotated git tags (`v<MAJOR>.<MINOR>.<PATCH>`, such as `v0.1.0`, `v2.0.0`, and `v2.0.1`) mark verified release milestones on `master`.
+- **Git release tags:** Annotated git tags (`v<MAJOR>.<MINOR>.<PATCH>`, such as `v0.1.0`, `v2.0.0`, `v2.0.1`, and `v2.0.2`) mark verified release milestones on `master`.
 
 ---
 

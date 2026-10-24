@@ -43,6 +43,12 @@ python -m chat_report --aggregate <id1> <id2>
 # Validate a JSON report against the v2.0 schema and arithmetic invariants
 python -m chat_report --validate <path/to/report.json>
 
+# Install global runtime + CLI shims + lightweight User skill (or Workspace skill with --workspace)
+python -m chat_report --install [--bin-dir <dir>] [--runtime-dir <dir>] [--workspace <dir>] [--force]
+
+# Install or refresh only the lightweight SKILL.md (defaults to User scope; Workspace with --workspace)
+python -m chat_report --install-skill [--workspace <dir>] [--skill-dir <dir>] [--force]
+
 # Install a self-contained skill bundle into a destination directory
 python -m chat_report --bundle-into <dest_skill_dir> --force
 ```
@@ -64,14 +70,22 @@ python -m chat_report --bundle-into <dest_skill_dir> --force
 | `--state-db <path>`        | OS default                   | Override path to Cursor `state.vscdb`.                                                     |
 | `--tracking-db <path>`     | OS default                   | Override path to Cursor `ai-code-tracking.db`.                                             |
 | `--denial-marker <str>`    | `[]`                         | Repeatable custom hook or harness denial substring marker.                                 |
+| `--bin-dir <dir>`          | `~/.local/bin`               | Directory for `chat-report` CLI shims during `--install`.                                  |
+| `--runtime-dir <dir>`      | OS user data dir             | Directory for the standalone `chat_report` runtime during `--install`.                     |
+| `--skill-dir <dir>`        | Scope default                | Explicit destination directory for `SKILL.md` during `--install` / `--install-skill`.      |
+| `--no-skill`               | `False`                      | Skip `SKILL.md` installation during `--install`.                                           |
+| `--force`, `-f`            | `False`                      | Overwrite existing targets during `--install`, `--install-skill`, or `--bundle-into`.      |
 | `--verbose`                | `False`                      | Print diagnostic parse warnings to stderr.                                                 |
-| `-V`, `--version`          | -                            | Print `chat-report 2.0.1 (schema 2.0)` and exit.                                           |
+| `-V`, `--version`          | -                            | Print `chat-report 2.0.2 (schema 2.0)` and exit.                                           |
 
 ### Environment Variables & Exit Codes
 
 - `CURSOR_STATE_DB`: Fallback path to `state.vscdb` when `--state-db` is omitted.
 - `CURSOR_TRACKING_DB`: Fallback path to `ai-code-tracking.db` when `--tracking-db` is omitted.
 - `CURSOR_PRODUCT_JSON`: Fallback path to Cursor `product.json` for version detection.
+- `CHAT_REPORT_BIN_DIR`: Default shim directory for `--install` when `--bin-dir` is omitted.
+- `CHAT_REPORT_RUNTIME_DIR`: Default runtime directory for `--install` when `--runtime-dir` is omitted.
+- `CHAT_REPORT_PYTHON`: Explicit Python 3.10+ interpreter override used by installed CLI shims.
 - **Exit codes:** `0` success, `1` runtime/storage/validation error, `2` CLI usage error.
 
 ## 3. Agent Workflow & Engineering Rules

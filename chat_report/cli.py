@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import json
 import os
 import sys
@@ -12,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from chat_report import SCHEMA_VERSION, __version__
+from chat_report import SCHEMA_VERSION, __version__, installer
 import chat_report.adapters
 from chat_report.core.adapter import ExtractOptions, ResolvedTarget, SessionNotFoundError, StoreAccessError, get_adapter
 from chat_report.core.classifier import classify_session
@@ -91,17 +90,6 @@ def _normalize_boolean_argv(argv: list[str]) -> list[str]:
     return normalized
 
 
-def _resolve_bundler_script() -> Path:
-    here = Path(__file__).resolve().parent
-    bundled_script = here.parent / "run.py"
-    if bundled_script.is_file():
-        return bundled_script
-    checkout_script = here.parent / "skills" / "chat-report" / "scripts" / "run.py"
-    if checkout_script.is_file():
-        return checkout_script
-    raise ValueError("Bundler script skills/chat-report/scripts/run.py was not found.")
-
-
 def strip_deprecated_v1_argv(argv: list[str]) -> tuple[list[str], bool]:
     """Remove deprecated v1 shape/tool flags before argparse sees them."""
     cleaned: list[str] = []
@@ -140,6 +128,9 @@ def _parser() -> argparse.ArgumentParser:
     mode.add_argument("--diff", nargs=2, metavar=("BEFORE", "AFTER"))
     mode.add_argument("--aggregate", nargs="+", metavar="SESSION_ID")
     mode.add_argument("--validate", type=_clean_path, metavar="JSON_PATH")
+    mode.add_argument("--bundle-into", metavar="DEST_SKILL_DIR")
+    mode.add_argument("--install", action="store_true")
+    mode.add_argument("--install-skill", action="store_true")
     id_kind = parser.add_mutually_exclusive_group()
     id_kind.add_argument("--request-id", action="store_true")
     id_kind.add_argument("--chat-id", action="store_true")
@@ -154,6 +145,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-db", type=_clean_path)
     parser.add_argument("--tracking-db", type=_clean_path)
     parser.add_argument("--denial-marker", action="append", default=[])
+    parser.add_argument("--bin-dir", type=_clean_path)
+    parser.add_argument("--runtime-dir", type=_clean_path)
+    parser.add_argument("--skill-dir", type=_clean_path)
+    parser.add_argument("--no-skill", action="store_true")
+    parser.add_argument("--force", "-f", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     return parser
 
@@ -239,6 +235,8 @@ def _options(args: argparse.Namespace, workspace: Path) -> ExtractOptions:
 def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> Path:
     if args.session_id is None and not any((args.latest, args.list_recent is not None, args.diff, args.aggregate, args.validate)):
         parser.error("provide a session ID or one mode flag")
+    if any((args.bin_dir is not None, args.runtime_dir is not None, args.skill_dir is not None, args.no_skill, args.force)):
+        parser.error("installation flags require --install, --install-skill, or --bundle-into")
     if args.aggregate is not None and len(args.aggregate) < 2:
         parser.error("--aggregate requires at least two session IDs")
     if args.list_include_subagents and args.list_recent is None:
@@ -256,17 +254,9 @@ def main(argv: list[str] | None = None) -> int:
     """Execute CLI mode and return a process exit code."""
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     try:
-        if any(arg == "--bundle-into" or arg.startswith("--bundle-into=") for arg in raw_argv):
-            script_path = _resolve_bundler_script()
-            spec = importlib.util.spec_from_file_location("chat_report_skill_bundler", script_path)
-            if spec is None or spec.loader is None:
-                raise ValueError(f"Unable to load bundler script: {script_path}")
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            destination, force = module._bundle_args(raw_argv)
-            if destination is not None:
-                module.bundle_into(destination, force)
-                return 0
+        if installer.has_install_flags(raw_argv):
+            installer.handle_install_argv(raw_argv)
+            return 0
         argv, stripped = strip_deprecated_v1_argv(raw_argv)
         if stripped:
             print("[chat-report] WARNING: deprecated-v1-flag: --shape/--tools are deprecated in v2.0 and ignored.", file=sys.stderr)
