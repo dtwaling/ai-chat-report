@@ -10,6 +10,7 @@ from chat_report.core.ir import (
     CANONICAL_TOOL_KINDS,
     HEURISTIC_IDS,
     RESOLVED_SOURCES,
+    SCHEMA_VERSION,
     SEMANTIC_TOOL_CLASSES,
     SEVERITY_LEVELS,
     TOOL_CALL_STATUSES,
@@ -46,7 +47,7 @@ def _count_map(value: Any, label: str, keys: set[str] | None = None) -> None:
 def _assert_envelope(payload: dict[str, Any], expected_kind: str) -> None:
     for key in ("schema_version", "report_kind", "generated_at_iso", "harness", "harness_version", "warnings"):
         _assert(key in payload, f"missing envelope key {key}")
-    _assert(payload["schema_version"] == "2.0", "schema_version must be 2.0")
+    _assert(payload["schema_version"] == SCHEMA_VERSION, f"schema_version must be {SCHEMA_VERSION}")
     _assert(payload["report_kind"] == expected_kind, f"report_kind must be {expected_kind}")
     _str(payload["generated_at_iso"], "generated_at_iso")
     _str(payload["harness"], "harness")
@@ -90,7 +91,7 @@ def _assert_session_block(session: Any) -> None:
     _keys(session, expected, "session")
     for key in ("schema_version", "harness", "harness_version", "session_id", "session_id_normalized"):
         _str(session[key], f"session.{key}")
-    _assert(session["schema_version"] == "2.0", "session.schema_version must be 2.0")
+    _assert(session["schema_version"] == SCHEMA_VERSION, f"session.schema_version must be {SCHEMA_VERSION}")
     _assert(session["session_id_normalized"] == session["session_id"].strip().lower(), "session normalized ID mismatch")
     for key in ("parent_session_id", "subagent_type", "title", "mode", "status", "model_name", "reasoning_effort"):
         _str(session[key], f"session.{key}", nullable=True)

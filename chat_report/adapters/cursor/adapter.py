@@ -41,6 +41,7 @@ from chat_report.core.adapter import (
 from chat_report.core.ir import (
     CustomizationRefIR,
     ResolvedTarget,
+    SCHEMA_VERSION,
     SessionIR,
     SubagentSummaryIR,
     TurnIR,
@@ -350,7 +351,7 @@ class CursorAdapter:
             parent_session_id = _text(data.get("parentComposerId")) or _text(subagent_info.get("parentComposerId")) or None
             is_subagent = bool(data.get("isSubagent")) or bool(parent_session_id) or bool(subagent_info)
             subagent_type = _clean_subagent_type(data.get("subagentTypeName")) or _clean_subagent_type(subagent_info.get("subagentTypeName"))
-            session = SessionIR("2.0", self.harness_name, detect_cursor_version(state_con, data), session_id, normalized,
+            session = SessionIR(SCHEMA_VERSION, self.harness_name, detect_cursor_version(state_con, data), session_id, normalized,
                 parent_session_id, is_subagent, subagent_type,
                 _text(data.get("name")) or None, _text(data.get("unifiedMode")) or None, _normalize_session_status(data.get("status"), turns),
                 _text((data.get("modelConfig") or {}).get("modelName")) if isinstance(data.get("modelConfig"), dict) else None,

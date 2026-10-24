@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from chat_report.core.diagnostics import evaluate_diagnostics
-from chat_report.core.ir import DiagnosticFinding, SessionIR, TOOL_CALL_STATUSES
+from chat_report.core.ir import DiagnosticFinding, SCHEMA_VERSION, SessionIR, TOOL_CALL_STATUSES
 
 
 def _finding_dict(finding: DiagnosticFinding) -> dict[str, Any]:
@@ -111,7 +111,7 @@ def _envelope(kind: str, sessions: Iterable[SessionIR]) -> dict[str, Any]:
         for warning in session.warnings:
             if warning not in warnings:
                 warnings.append(warning)
-    return {"schema_version": "2.0", "report_kind": kind, "generated_at_iso": datetime.now(timezone.utc).isoformat(), "harness": next(iter(harnesses)) if len(harnesses) == 1 else "mixed", "harness_version": next(iter(versions)) if len(versions) == 1 else "mixed", "warnings": warnings}
+    return {"schema_version": SCHEMA_VERSION, "report_kind": kind, "generated_at_iso": datetime.now(timezone.utc).isoformat(), "harness": next(iter(harnesses)) if len(harnesses) == 1 else "mixed", "harness_version": next(iter(versions)) if len(versions) == 1 else "mixed", "warnings": warnings}
 
 
 def build_diff_report(before_session: SessionIR, after_session: SessionIR, *, before_diagnostics: list[DiagnosticFinding] | None = None, after_diagnostics: list[DiagnosticFinding] | None = None, workspace: Path | None = None) -> dict[str, Any]:

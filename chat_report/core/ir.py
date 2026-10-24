@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from chat_report import SCHEMA_VERSION
+
 
 class CanonicalToolKind(str, Enum):
     """Normalized functional category for any tool call across harnesses."""

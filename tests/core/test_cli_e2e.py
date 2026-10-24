@@ -14,8 +14,10 @@ from types import ModuleType
 
 import pytest
 
+import chat_report
 import chat_report.cli as cli
 from chat_report.cli import main, strip_deprecated_v1_argv
+from chat_report.core.ir import SCHEMA_VERSION
 from tests._fixtures import DEFAULT_SESSION_ID, create_synthetic_state_db, create_synthetic_tracking_db
 
 
@@ -329,4 +331,27 @@ def test_cli_boolean_flag_values_and_quoted_paths(tmp_path: Path) -> None:
     assert main(["--no-subagents", "false", DEFAULT_SESSION_ID, *quoted_args]) == 0
     assert main(["--request-id", "true", "request-0", *quoted_args]) == 0
     assert main(["--latest=false", DEFAULT_SESSION_ID, *quoted_args]) == 0
+
+
+def test_version_constants_and_cli_version_flags() -> None:
+    assert chat_report.__version__ == "2.0.0"
+    assert chat_report.SCHEMA_VERSION == "2.0"
+    assert SCHEMA_VERSION == "2.0"
+    repository = Path(__file__).parents[2]
+    entrypoints = (
+        [sys.executable, "-m", "chat_report"],
+        [sys.executable, str(repository / "cursor" / "chat-report.py")],
+        [sys.executable, str(repository / "skills" / "chat-report" / "scripts" / "run.py")],
+    )
+    for command in entrypoints:
+        for flag in ("--version", "-V"):
+            result = subprocess.run(
+                [*command, flag],
+                cwd=repository,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            assert result.returncode == 0
+            assert result.stdout.strip() == "chat-report 2.0.0 (schema 2.0)"
 

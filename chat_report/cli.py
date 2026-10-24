@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from chat_report import SCHEMA_VERSION, __version__
 import chat_report.adapters
 from chat_report.core.adapter import ExtractOptions, ResolvedTarget, SessionNotFoundError, StoreAccessError, get_adapter
 from chat_report.core.classifier import classify_session
@@ -126,6 +127,12 @@ def strip_deprecated_v1_argv(argv: list[str]) -> tuple[list[str], bool]:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="chat-report")
+    parser.add_argument(
+        "-V",
+        "--version",
+        action="version",
+        version=f"chat-report {__version__} (schema {SCHEMA_VERSION})",
+    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("session_id", nargs="?")
     mode.add_argument("--latest", action="store_true")
