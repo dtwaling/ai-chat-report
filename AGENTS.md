@@ -76,7 +76,7 @@ python -m chat_report --bundle-into <dest_skill_dir> --force
 | `--no-skill`               | `False`                      | Skip `SKILL.md` installation during `--install`.                                           |
 | `--force`, `-f`            | `False`                      | Overwrite existing targets during `--install`, `--install-skill`, or `--bundle-into`.      |
 | `--verbose`                | `False`                      | Print diagnostic parse warnings to stderr.                                                 |
-| `-V`, `--version`          | -                            | Print `chat-report 2.0.2 (schema 2.0)` and exit.                                           |
+| `-V`, `--version`          | -                            | Print `chat-report n.n.n (schema n.n)` and exit.                                           |
 
 ### Environment Variables & Exit Codes
 
