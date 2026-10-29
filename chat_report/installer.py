@@ -972,7 +972,7 @@ def install_cli(
                     replace_fn(bak_file, file_path)
             except OSError as rollback_exc:
                 print(
-                    f"[chat-report] WARNING: shim rollback failed to restore {file_path}: {rollback_exc}",
+                    f"[chat-report] WARNING: file rollback failed to restore {file_path}: {rollback_exc}",
                     file=sys.stderr,
                 )
         for dir_path, dir_bak in reversed(dir_backups):

@@ -578,6 +578,24 @@ class CursorAdapter:
             ]
             dispatch_call = dispatch_calls[-1] if dispatch_calls else None
             dispatch_status = _text(dispatch_call.input_params.get("_dispatch_status")) or None if dispatch_call else None
+            is_bg_dispatch = (
+                bool(dispatch_call.input_params.get("run_in_background") or dispatch_call.input_params.get("runInBackground"))
+                if dispatch_call
+                else False
+            )
+            if dispatch_status is None and dispatch_call is not None:
+                if dispatch_call.status == "cancelled":
+                    effective_dispatch_status: str | None = "aborted"
+                elif dispatch_call.status in ("error", "denied"):
+                    effective_dispatch_status = "errored"
+                elif dispatch_call.status == "completed" and not is_bg_dispatch:
+                    effective_dispatch_status = "completed"
+                else:
+                    effective_dispatch_status = None
+            else:
+                effective_dispatch_status = dispatch_status
+            if is_bg_dispatch and (effective_dispatch_status or "").strip().lower() in ("completed", "success"):
+                effective_dispatch_status = None
             resolved_sub_type = child.subagent_type
             if not resolved_sub_type:
                 for call in dispatch_calls:
@@ -588,14 +606,27 @@ class CursorAdapter:
                             break
                     if resolved_sub_type:
                         break
-            sub_status = None if child.in_flight else _normalize_session_status(child.status, child.turns, dispatch_status)
-            sub_duration = None if child.in_flight else child.duration_ms
+            parent_terminal = (effective_dispatch_status or "").strip().lower() in (
+                "aborted", "cancelled", "canceled", "error", "errored", "failed", "completed", "success"
+            )
+            child_in_flight = child.in_flight and not parent_terminal
+            if child_in_flight:
+                sub_status = None
+                sub_duration = None
+            else:
+                sub_status = _normalize_session_status(child.status, child.turns, effective_dispatch_status)
+                sub_duration = child.duration_ms
+                if sub_duration is None:
+                    child_ends = [t.completed_at_ms for t in child.turns if isinstance(t.completed_at_ms, int)]
+                    max_end = max(child_ends) if child_ends else None
+                    if isinstance(child.started_at_ms, int) and isinstance(max_end, int) and max_end >= child.started_at_ms:
+                        sub_duration = max_end - child.started_at_ms
             session.subagents.append(SubagentSummaryIR(sub_id, dispatch.get(norm_sub), resolved_sub_type, child.title, child.model_name,
                 sub_status, sub_duration, len(child.turns), sum(len(t.tool_calls) for t in child.turns),
                 sum(1 for t in child.turns for c in t.tool_calls if c.is_error), sum(1 for t in child.turns for c in t.tool_calls if c.is_denied),
                 [path for path in reads if _customization_kind(path) == "skill"],
                 [path for path in reads if _customization_kind(path) in ("rule", "agent_doc")],
-                in_flight=child.in_flight))
+                in_flight=child_in_flight))
 
 
 register_adapter("cursor", CursorAdapter)

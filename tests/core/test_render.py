@@ -586,4 +586,15 @@ def test_validator_rejects_in_flight_captured_at_ms_and_top_context_nodes_violat
     with pytest.raises(ValueError, match="top_context_nodes.estimatedTokens must be an int"):
         assert_v2_report_conforms(bad_nodes_bool)
 
+    # Legacy v2.0 report (without in_flight and without captured_at_ms) with unsorted top_context_nodes passes validation
+    legacy_report = deepcopy(report)
+    legacy_report["session"].pop("in_flight", None)
+    legacy_report["session"].pop("captured_at_ms", None)
+    legacy_report["session"]["token_breakdown"]["top_context_nodes"] = [
+        {"id": "small", "tokens": 10},
+        {"id": "large", "tokens": 20},
+    ]
+    assert_v2_report_conforms(legacy_report)
+
+
 

@@ -283,7 +283,7 @@ def test_search_grep_and_file_read_output_recovery():
 def test_resolve_governing_shell_command_and_benign_nonzero_exits():
     assert resolve_governing_shell_command({"command": '& "C:\\Program Files\\Git\\bin\\git.exe" diff --quiet'}) == ("git", ["diff", "--quiet"])
     assert resolve_governing_shell_command({"command": "/usr/local/bin/rg 'a|b;c' src/ | Select-Object -First 5"}) == ("rg", ["a|b;c", "src/"])
-    assert resolve_governing_shell_command({"command": "cd /repo && pip3 show pytest || echo fallback"}) == ("echo", ["fallback"])
+    assert resolve_governing_shell_command({"command": "cd /repo && pip3 show pytest || echo fallback"}) == ("pip3", ["show", "pytest"])
     assert resolve_governing_shell_command({
         "command": "Get-Command node | Format-List",
         "parsingResult": {
@@ -387,6 +387,24 @@ def test_resolve_governing_shell_command_and_benign_nonzero_exits():
     assert single_native_with_cmdlets.input_params["_governing_exe"] == "pip"
     assert single_native_with_cmdlets.input_params["_exit_code"] == 1
     assert single_native_with_cmdlets.input_params["_benign_nonzero_exit"] is True
+
+    # Navigation prefix (cd D:\repo && rg -n pattern src/) with exitCode: 1 resolves _governing_exe == "rg" and is benign
+    cd_and_rg = map_tool_call(
+        {
+            "name": "run_terminal_command_v2",
+            "status": "completed",
+            "params": {"command": r"cd D:\repo && rg -n pattern src/"},
+            "result": {"exitCode": 1, "output": ""},
+        },
+        call_index=1,
+        turn_index=1,
+        bubble_id="b",
+    )
+    assert cd_and_rg.input_params["_governing_exe"] == "rg"
+    assert cd_and_rg.status == "completed"
+    assert cd_and_rg.is_error is False
+    assert cd_and_rg.input_params["_benign_nonzero_exit"] is True
+
 
 
 

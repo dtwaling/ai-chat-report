@@ -36,7 +36,8 @@ _POWERSHELL_CMDLETS: frozenset[str] = frozenset({
     "get-command", "format-list", "format-table", "select-object", "where-object",
     "foreach-object", "sort-object", "measure-object", "out-string", "out-null",
     "get-childitem", "get-content", "get-item", "test-path", "write-output",
-    "write-host", "select-string",
+    "write-host", "select-string", "cd", "chdir", "sl", "set-location",
+    "pushd", "popd", "push-location", "pop-location", "echo", "pwd", "get-location",
 })
 
 

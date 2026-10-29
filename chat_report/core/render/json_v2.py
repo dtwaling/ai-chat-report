@@ -124,29 +124,31 @@ def _assert_session_block(session: Any) -> None:
         _int(values["tokens"], f"by_category.{category}.tokens")
         _int(values["chars"], f"by_category.{category}.chars")
     _assert(
-        isinstance(token["top_context_nodes"], list) and len(token["top_context_nodes"]) <= 15,
+        isinstance(token["top_context_nodes"], list)
+        and all(isinstance(n, dict) for n in token["top_context_nodes"]),
         "top_context_nodes invalid",
     )
-    for node in token["top_context_nodes"]:
-        _assert(isinstance(node, dict), "top_context_nodes item must be an object")
-        for nkey in ("estimatedTokens", "tokens", "characterCount", "chars"):
-            if nkey in node and node[nkey] is not None:
-                _int(node[nkey], f"top_context_nodes.{nkey}")
-    def _node_sort_key(n: dict[str, Any]) -> tuple[int, int, str]:
-        est = n.get("estimatedTokens")
-        tok = est if isinstance(est, int) and not isinstance(est, bool) else (
-            n["tokens"] if isinstance(n.get("tokens"), int) and not isinstance(n.get("tokens"), bool) else 0
+    if "in_flight" in session or "captured_at_ms" in session:
+        _assert(len(token["top_context_nodes"]) <= 15, "top_context_nodes invalid")
+        for node in token["top_context_nodes"]:
+            for nkey in ("estimatedTokens", "tokens", "characterCount", "chars"):
+                if nkey in node and node[nkey] is not None:
+                    _int(node[nkey], f"top_context_nodes.{nkey}")
+        def _node_sort_key(n: dict[str, Any]) -> tuple[int, int, str]:
+            est = n.get("estimatedTokens")
+            tok = est if isinstance(est, int) and not isinstance(est, bool) else (
+                n["tokens"] if isinstance(n.get("tokens"), int) and not isinstance(n.get("tokens"), bool) else 0
+            )
+            ch = n.get("characterCount")
+            chr_val = ch if isinstance(ch, int) and not isinstance(ch, bool) else (
+                n["chars"] if isinstance(n.get("chars"), int) and not isinstance(n.get("chars"), bool) else 0
+            )
+            return (-tok, -chr_val, str(n.get("id") or n.get("label") or ""))
+        _assert(
+            [_node_sort_key(n) for n in token["top_context_nodes"]]
+            == sorted(_node_sort_key(n) for n in token["top_context_nodes"]),
+            "top_context_nodes not sorted",
         )
-        ch = n.get("characterCount")
-        chr_val = ch if isinstance(ch, int) and not isinstance(ch, bool) else (
-            n["chars"] if isinstance(n.get("chars"), int) and not isinstance(n.get("chars"), bool) else 0
-        )
-        return (-tok, -chr_val, str(n.get("id") or n.get("label") or ""))
-    _assert(
-        [_node_sort_key(n) for n in token["top_context_nodes"]]
-        == sorted(_node_sort_key(n) for n in token["top_context_nodes"]),
-        "top_context_nodes not sorted",
-    )
     _assert(isinstance(session["customizations"], list), "customizations invalid")
     for ref in session["customizations"]:
         _keys(ref, {"kind", "path", "source", "turn_index"}, "customization")

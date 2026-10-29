@@ -973,5 +973,29 @@ def test_with_noether_scopes_warnings_restrictions_and_rollback(
     assert (ws_dash / "SKILL.md").read_text(encoding="utf-8") == "custom_dash_v1"
     assert ws_skill_md.read_text(encoding="utf-8") == "custom_skill_v1"
 
+    # Verify install_cli file rollback warning uses "file rollback failed to restore"
+    capsys.readouterr()
+
+    def fail_on_skill_and_file_restore(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        src_str, dst_str = str(src), str(dst)
+        if "chat-report" in dst_str and ".stage." in src_str and Path(dst).name == "chat-report" and "skills" in dst_str:
+            raise OSError("simulated skill stage swap failure")
+        if ".bak." in src_str and Path(dst).name in ("chat-report.cmd", "chat-report"):
+            raise OSError("simulated file restore failure")
+        real_replace(src, dst)
+
+    with pytest.raises(OSError, match="simulated skill stage swap failure"):
+        installer.install_cli(
+            runtime_dir=rt_dir,
+            bin_dir=bin_dir,
+            workspace=ws_dir,
+            force=True,
+            replace_fn=fail_on_skill_and_file_restore,
+        )
+    rollback_err = capsys.readouterr().err
+    assert "file rollback failed to restore" in rollback_err
+    assert "shim rollback failed to restore" not in rollback_err
+
+
 
 

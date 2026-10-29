@@ -750,5 +750,140 @@ def test_token_counts_and_top_context_nodes_ranking():
     assert "estimatedTokens" not in tb_tie.top_context_nodes[1]
 
 
+def test_parent_terminal_dispatch_overrides_child_in_flight(tmp_path):
+    session_id = "0a7d3243-61b6-4b3a-8fc5-43c73e2db583"
+    state = create_synthetic_state_db(tmp_path / "state.vscdb", session_id=session_id, bubble_count=2)
+    tracking = create_synthetic_tracking_db(tmp_path / "tracking.db", session_id=session_id)
+    con = sqlite3.connect(state)
+    parent = json.loads(con.execute("SELECT value FROM cursorDiskKV WHERE key = ?", (f"composerData:{session_id}",)).fetchone()[0])
+    child_ids = [
+        "child-aborted-stale-loading",
+        "child-truly-in-flight",
+        "child-sync-completed-no-additional",
+        "child-bg-still-running",
+    ]
+    parent["subagentComposerIds"] = child_ids
+    con.execute("UPDATE cursorDiskKV SET value = ? WHERE key = ?", (json.dumps(parent), f"composerData:{session_id}"))
+
+    # Bubble 1: parent task_v2 call has status="completed" and additionalData={"status": "aborted"}
+    b1_key = f"bubbleId:{session_id}:bubble-001"
+    b1 = json.loads(con.execute("SELECT value FROM cursorDiskKV WHERE key = ?", (b1_key,)).fetchone()[0])
+    b1["toolFormerData"] = {
+        "name": "task_v2",
+        "status": "completed",
+        "params": {"subagent_type": "explore"},
+        "result": {"agentId": "child-aborted-stale-loading"},
+        "additionalData": {"status": "aborted"},
+    }
+    con.execute("UPDATE cursorDiskKV SET value = ? WHERE key = ?", (json.dumps(b1), b1_key))
+
+    # Bubble 2: parent task_v2 call has status="loading"
+    b2 = {
+        "type": 2,
+        "text": "dispatching second subagent",
+        "startedAtMs": 1200,
+        "completedAtMs": 1250,
+        "toolFormerData": {
+            "name": "task_v2",
+            "status": "loading",
+            "params": {"subagent_type": "generalPurpose"},
+            "result": {"agentId": "child-truly-in-flight"},
+        },
+    }
+    # Bubble 3: parent task_v2 call has status="completed" and no additionalData (foreground)
+    b3 = {
+        "type": 2,
+        "text": "dispatching third subagent",
+        "startedAtMs": 1260,
+        "completedAtMs": 1300,
+        "toolFormerData": {
+            "name": "task_v2",
+            "status": "completed",
+            "params": {"subagent_type": "explore"},
+            "result": {"agentId": "child-sync-completed-no-additional"},
+        },
+    }
+    # Bubble 4: parent task_v2 call has status="completed", additionalData={"status": "success", ...}, and run_in_background=True
+    b4 = {
+        "type": 2,
+        "text": "dispatching background subagent",
+        "startedAtMs": 1310,
+        "completedAtMs": 1350,
+        "toolFormerData": {
+            "name": "task_v2",
+            "status": "completed",
+            "params": {"subagent_type": "generalPurpose", "run_in_background": True},
+            "result": {"agentId": "child-bg-still-running"},
+            "additionalData": {"status": "success", "subagentComposerId": "child-bg-still-running"},
+        },
+    }
+    con.execute("INSERT INTO cursorDiskKV VALUES (?, ?)", (f"bubbleId:{session_id}:bubble-002", json.dumps(b2)))
+    con.execute("INSERT INTO cursorDiskKV VALUES (?, ?)", (f"bubbleId:{session_id}:bubble-003", json.dumps(b3)))
+    con.execute("INSERT INTO cursorDiskKV VALUES (?, ?)", (f"bubbleId:{session_id}:bubble-004", json.dumps(b4)))
+    con.execute(
+        "UPDATE cursorDiskKV SET value = ? WHERE key = ?",
+        (
+            json.dumps([
+                {"bubbleId": "bubble-000", "type": 1},
+                {"bubbleId": "bubble-001", "type": 2},
+                {"bubbleId": "bubble-002", "type": 2},
+                {"bubbleId": "bubble-003", "type": 2},
+                {"bubbleId": "bubble-004", "type": 2},
+            ]),
+            f"composerConvHeaders:{session_id}:000000",
+        ),
+    )
+
+    for cid in child_ids:
+        child_data = {
+            "name": cid,
+            "createdAt": 1000,
+            "lastUpdatedAt": 1150,
+            "status": "running",
+            "isSubagent": True,
+            "parentComposerId": session_id,
+        }
+        con.execute("INSERT INTO cursorDiskKV VALUES (?, ?)", (f"composerData:{cid}", json.dumps(child_data)))
+        con.execute(
+            "INSERT INTO cursorDiskKV VALUES (?, ?)",
+            (
+                f"bubbleId:{cid}:user",
+                json.dumps({
+                    "type": 1,
+                    "text": "work",
+                    "startedAtMs": 1000,
+                    "completedAtMs": 1150,
+                    "toolFormerData": {"name": "read_file_v2", "status": "loading", "params": {"targetFile": "a.py"}},
+                }),
+            ),
+        )
+        con.execute("INSERT INTO cursorDiskKV VALUES (?, ?)", (f"composerConvHeaders:{cid}:000000", json.dumps([{"bubbleId": "user", "type": 1}])))
+    con.commit()
+    con.close()
+
+    session = CursorAdapter().extract_session(session_id, ExtractOptions(state_db=state, tracking_db=tracking))
+    by_id = {sub.session_id: sub for sub in session.subagents}
+    aborted_sub = by_id["child-aborted-stale-loading"]
+    assert aborted_sub.in_flight is False
+    assert aborted_sub.status == "aborted"
+    assert aborted_sub.duration_ms == 150
+
+    live_sub = by_id["child-truly-in-flight"]
+    assert live_sub.in_flight is True
+    assert live_sub.status is None
+    assert live_sub.duration_ms is None
+
+    sync_done_sub = by_id["child-sync-completed-no-additional"]
+    assert sync_done_sub.in_flight is False
+    assert sync_done_sub.status == "completed"
+    assert sync_done_sub.duration_ms == 150
+
+    bg_live_sub = by_id["child-bg-still-running"]
+    assert bg_live_sub.in_flight is True
+    assert bg_live_sub.status is None
+    assert bg_live_sub.duration_ms is None
+
+
+
 
 
