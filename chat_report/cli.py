@@ -34,6 +34,7 @@ _BOOLEAN_FLAGS = frozenset({
     "--no-subagents",
     "--list-include-subagents",
     "--include-orphans",
+    "--with-noether",
     "--verbose",
 })
 _TRUE_LITERALS = frozenset({"true", "1", "yes"})
@@ -149,6 +150,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--runtime-dir", type=_clean_path)
     parser.add_argument("--skill-dir", type=_clean_path)
     parser.add_argument("--no-skill", action="store_true")
+    parser.add_argument("--with-noether", action="store_true")
     parser.add_argument("--force", "-f", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     return parser
@@ -235,7 +237,7 @@ def _options(args: argparse.Namespace, workspace: Path) -> ExtractOptions:
 def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> Path:
     if args.session_id is None and not any((args.latest, args.list_recent is not None, args.diff, args.aggregate, args.validate)):
         parser.error("provide a session ID or one mode flag")
-    if any((args.bin_dir is not None, args.runtime_dir is not None, args.skill_dir is not None, args.no_skill, args.force)):
+    if any((args.bin_dir is not None, args.runtime_dir is not None, args.skill_dir is not None, args.no_skill, args.with_noether, args.force)):
         parser.error("installation flags require --install, --install-skill, or --bundle-into")
     if args.aggregate is not None and len(args.aggregate) < 2:
         parser.error("--aggregate requires at least two session IDs")

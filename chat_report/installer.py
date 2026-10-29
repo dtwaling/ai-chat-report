@@ -17,6 +17,8 @@ from typing import Callable
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _PACKAGED_SKILL_MD = _PACKAGE_DIR / "assets" / "SKILL.md"
+_PACKAGED_NOETHER_AGENT_MD = _PACKAGE_DIR / "assets" / "agents" / "noether-analyst.md"
+_PACKAGED_DASHBOARD_SKILL_DIR = _PACKAGE_DIR / "assets" / "skills" / "chat-report-dashboard"
 _TRUE_LITERALS = frozenset({"true", "1", "yes"})
 _FALSE_LITERALS = frozenset({"false", "0", "no"})
 _BOOL_LITERALS = _TRUE_LITERALS | _FALSE_LITERALS
@@ -35,6 +37,7 @@ _INSTALL_OPTION_FLAGS = frozenset({
     "--runtime-dir",
     "--skill-dir",
     "--no-skill",
+    "--with-noether",
     "--workspace",
     "--harness",
     "--force",
@@ -227,6 +230,10 @@ def validate_harness_name(harness: str) -> str:
     return cleaned
 
 
+def _lexical_abspath(path: Path | str) -> Path:
+    return Path(os.path.abspath(str(path)))
+
+
 def resolve_skill_dir(
     harness: str = "cursor",
     workspace: Path | str | None = None,
@@ -235,14 +242,34 @@ def resolve_skill_dir(
     validated_harness = validate_harness_name(harness)
     if skill_dir is not None:
         cleaned, _ = _clean_destination(str(skill_dir), "--skill-dir")
-        return Path(cleaned)
+        return _lexical_abspath(cleaned)
     if workspace is not None:
         cleaned_ws, _ = _clean_destination(str(workspace), "--workspace")
-        ws_path = Path(cleaned_ws).resolve()
+        ws_path = _lexical_abspath(cleaned_ws)
         if not ws_path.exists() or not ws_path.is_dir():
             raise ValueError(f"--workspace must be an existing directory: {workspace}")
         return ws_path / f".{validated_harness}" / "skills" / "chat-report"
-    return Path.home() / f".{validated_harness}" / "skills" / "chat-report"
+    return _lexical_abspath(Path.home()) / f".{validated_harness}" / "skills" / "chat-report"
+
+
+def resolve_noether_targets(
+    harness: str = "cursor",
+    workspace: Path | str | None = None,
+) -> tuple[Path, Path, Path]:
+    validated_harness = validate_harness_name(harness)
+    if validated_harness != "cursor":
+        raise ValueError("--with-noether is only supported for --harness cursor.")
+    if workspace is not None:
+        cleaned_ws, _ = _clean_destination(str(workspace), "--workspace")
+        ws_path = _lexical_abspath(cleaned_ws)
+        if not ws_path.exists() or not ws_path.is_dir():
+            raise ValueError(f"--workspace must be an existing directory: {workspace}")
+        harness_root = ws_path / ".cursor"
+    else:
+        harness_root = _lexical_abspath(Path.home()) / ".cursor"
+    noether_agent_path = harness_root / "agents" / "noether-analyst.md"
+    dashboard_skill_dir = harness_root / "skills" / "chat-report-dashboard"
+    return harness_root, noether_agent_path, dashboard_skill_dir
 
 
 def _clean_destination(destination: str, flag_name: str = "--bundle-into") -> tuple[str, bool | None]:
@@ -256,7 +283,7 @@ def _clean_destination(destination: str, flag_name: str = "--bundle-into") -> tu
     cleaned = raw.strip().strip("\"'").strip()
     if not cleaned:
         raise ValueError(f"{flag_name} requires a destination.")
-    if any(tok in cleaned for tok in ("--force", "--bundle-into", "--install", "--install-skill")):
+    if any(tok in cleaned for tok in ("--force", "--bundle-into", "--install", "--install-skill", "--with-noether")):
         raise ValueError(f"Destination contains embedded flag tokens: {cleaned}")
     check_target = cleaned[4:] if cleaned.startswith("\\\\?\\") else cleaned
     if any(char in _ILLEGAL_DEST_CHARS for char in check_target):
@@ -339,6 +366,66 @@ def _copy_runtime(stage: Path, package: Path) -> None:
 
 def _copy_lightweight_skill(stage: Path, source_skill: Path | None = None) -> None:
     (stage / "SKILL.md").write_text(render_lightweight_skill_md(source_skill), encoding="utf-8")
+
+
+def _read_noether_agent_md(package: Path) -> str:
+    agent_md = package / "assets" / "agents" / "noether-analyst.md"
+    if not agent_md.is_file():
+        agent_md = _PACKAGED_NOETHER_AGENT_MD
+    if not agent_md.is_file():
+        raise ValueError("Packaged noether-analyst.md asset was not found.")
+    return agent_md.read_text(encoding="utf-8")
+
+
+def _copy_dashboard_skill(stage: Path, package: Path) -> None:
+    src_dir = package / "assets" / "skills" / "chat-report-dashboard"
+    if not src_dir.is_dir():
+        src_dir = _PACKAGED_DASHBOARD_SKILL_DIR
+    if not src_dir.is_dir():
+        raise ValueError("Packaged chat-report-dashboard skill directory was not found.")
+    for item in src_dir.iterdir():
+        if item.is_file():
+            shutil.copy2(item, stage / item.name)
+
+
+def _assert_regular_file_target(target: Path) -> None:
+    if (target.exists() or target.is_symlink()) and (target.is_symlink() or target.is_dir()):
+        raise ValueError(f"Expected regular file target: {target}")
+
+
+def _assert_regular_dir_target(target: Path) -> None:
+    if (target.exists() or target.is_symlink()) and (target.is_symlink() or not target.is_dir()):
+        raise ValueError(f"Expected regular directory target: {target}")
+
+
+def _collect_created_ancestors(targets: list[Path]) -> list[Path]:
+    created: list[Path] = []
+    seen: set[Path] = set()
+    for target in targets:
+        chain: list[Path] = []
+        current = _lexical_abspath(target)
+        while not current.exists() and not current.is_symlink():
+            chain.append(current)
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
+        for directory in reversed(chain):
+            if directory not in seen:
+                seen.add(directory)
+                created.append(directory)
+    return created
+
+
+def _warn_if_pars_missing(harness_root: Path) -> None:
+    user_pars = _lexical_abspath(Path.home()) / ".cursor" / "skills" / "pars" / "SKILL.md"
+    scope_pars = harness_root / "skills" / "pars" / "SKILL.md"
+    if not scope_pars.is_file() and not user_pars.is_file():
+        print(
+            "[chat-report] WARNING: pars-skill-missing: 'pars' skill was not found in ~/.cursor/skills/pars; "
+            "noether-analyst requires the 'pars' skill.",
+            file=sys.stderr,
+        )
 
 
 def _remove_entry(
@@ -602,6 +689,7 @@ def install_skill(
     *,
     harness: str = "cursor",
     workspace: Path | str | None = None,
+    with_noether: bool = False,
     force: bool = False,
     source_package: Path | None = None,
     source_skill: Path | None = None,
@@ -610,20 +698,108 @@ def install_skill(
     rmtree_fn: Callable[..., None] = shutil.rmtree,
 ) -> Path:
     """Atomically install the lightweight SKILL.md (referencing global chat-report)."""
-    target_skill = resolve_skill_dir(harness=harness, workspace=workspace, skill_dir=skill_dir).resolve()
-    _, sources = _resolve_sources(source_package, source_skill)
-    _check_source_overlap([target_skill], sources)
+    target_skill = _lexical_abspath(resolve_skill_dir(harness=harness, workspace=workspace, skill_dir=skill_dir))
+    harness_root: Path | None = None
+    noether_agent_path: Path | None = None
+    dashboard_skill_dir: Path | None = None
+    if with_noether:
+        harness_root, noether_agent_path, dashboard_skill_dir = resolve_noether_targets(
+            harness=harness,
+            workspace=workspace,
+        )
+
+    package, sources = _resolve_sources(source_package, source_skill)
+    targets = [target_skill]
+    if noether_agent_path is not None and dashboard_skill_dir is not None:
+        targets.extend((noether_agent_path, dashboard_skill_dir))
+    _check_source_overlap(targets, sources)
+
+    _assert_regular_dir_target(target_skill)
+    if noether_agent_path is not None and dashboard_skill_dir is not None:
+        _assert_regular_file_target(noether_agent_path)
+        _assert_regular_dir_target(dashboard_skill_dir)
+
     if target_skill.exists() and any(target_skill.iterdir()) and not force:
         raise ValueError(f"Skill destination is non-empty ({target_skill}); pass --force to replace it.")
+    if noether_agent_path is not None and noether_agent_path.exists() and not force:
+        raise ValueError(f"Agent destination already exists ({noether_agent_path}); pass --force to replace it.")
+    if dashboard_skill_dir is not None and dashboard_skill_dir.exists() and any(dashboard_skill_dir.iterdir()) and not force:
+        raise ValueError(f"Dashboard skill destination is non-empty ({dashboard_skill_dir}); pass --force to replace it.")
+
+    agent_md_text = _read_noether_agent_md(package) if with_noether else ""
+    dir_ancestor_targets = [target_skill]
+    if noether_agent_path is not None and dashboard_skill_dir is not None:
+        dir_ancestor_targets.extend((noether_agent_path.parent, dashboard_skill_dir))
+    created_ancestors = _collect_created_ancestors(dir_ancestor_targets)
+
     token = uuid.uuid4().hex
-    backup = _atomic_replace_dir(
-        target_skill,
-        lambda stage: _copy_lightweight_skill(stage, source_skill),
-        replace_fn=replace_fn,
-        rmtree_fn=rmtree_fn,
-        token=token,
-    )
-    _cleanup_dir_backup(backup, rmtree_fn=rmtree_fn)
+    stage_files: list[Path] = []
+    file_backups: list[tuple[Path, Path | None]] = []
+    dir_backups: list[tuple[Path, Path | None]] = []
+
+    try:
+        skill_backup = _atomic_replace_dir(
+            target_skill,
+            lambda stage: _copy_lightweight_skill(stage, source_skill),
+            replace_fn=replace_fn,
+            rmtree_fn=rmtree_fn,
+            token=token,
+        )
+        dir_backups.append((target_skill, skill_backup))
+
+        if noether_agent_path is not None and dashboard_skill_dir is not None:
+            noether_agent_path.parent.mkdir(parents=True, exist_ok=True)
+            stage_agent = noether_agent_path.parent / f".{noether_agent_path.name}.stage.{token}"
+            bak_agent = noether_agent_path.parent / f".{noether_agent_path.name}.bak.{token}"
+            stage_files.append(stage_agent)
+            stage_agent.write_text(agent_md_text, encoding="utf-8", newline="\n")
+            had_existing = noether_agent_path.exists()
+            file_backups.append((noether_agent_path, bak_agent if had_existing else None))
+            if had_existing:
+                replace_fn(noether_agent_path, bak_agent)
+            replace_fn(stage_agent, noether_agent_path)
+
+            dash_backup = _atomic_replace_dir(
+                dashboard_skill_dir,
+                lambda stage: _copy_dashboard_skill(stage, package),
+                replace_fn=replace_fn,
+                rmtree_fn=rmtree_fn,
+                token=token,
+            )
+            dir_backups.append((dashboard_skill_dir, dash_backup))
+    except BaseException:
+        for stage_file in stage_files:
+            stage_file.unlink(missing_ok=True)
+        for file_path, bak_file in reversed(file_backups):
+            try:
+                if bak_file is None:
+                    file_path.unlink(missing_ok=True)
+                elif bak_file.exists():
+                    file_path.unlink(missing_ok=True)
+                    replace_fn(bak_file, file_path)
+            except OSError as rollback_exc:
+                print(
+                    f"[chat-report] WARNING: file rollback failed to restore {file_path}: {rollback_exc}",
+                    file=sys.stderr,
+                )
+        for dir_path, dir_bak in reversed(dir_backups):
+            _rollback_dir(dir_path, dir_bak, replace_fn=replace_fn, rmtree_fn=rmtree_fn)
+        for created_dir in reversed(created_ancestors):
+            try:
+                if created_dir.exists() and created_dir.is_dir() and not any(created_dir.iterdir()):
+                    created_dir.rmdir()
+            except OSError:
+                pass
+        raise
+    else:
+        for _, dir_bak in dir_backups:
+            _cleanup_dir_backup(dir_bak, rmtree_fn=rmtree_fn)
+        for _, bak_file in file_backups:
+            if bak_file is not None and bak_file.exists():
+                bak_file.unlink(missing_ok=True)
+
+    if harness_root is not None:
+        _warn_if_pars_missing(harness_root)
     if check_cli_on_path and shutil.which("chat-report") is None:
         print(
             "[chat-report] WARNING: cli-not-on-path: 'chat-report' was not found on PATH; "
@@ -641,6 +817,7 @@ def install_cli(
     harness: str = "cursor",
     workspace: Path | str | None = None,
     include_skill: bool = True,
+    with_noether: bool = False,
     force: bool = False,
     source_package: Path | None = None,
     source_skill: Path | None = None,
@@ -652,46 +829,79 @@ def install_cli(
         cleaned_rt, inferred_rt = _clean_destination(str(runtime_dir), "--runtime-dir")
         if inferred_rt is not None and not force:
             force = inferred_rt
-        resolved_runtime = Path(cleaned_rt).resolve()
+        resolved_runtime = _lexical_abspath(cleaned_rt)
     else:
-        resolved_runtime = default_runtime_dir().resolve()
+        resolved_runtime = _lexical_abspath(default_runtime_dir())
 
     if bin_dir is not None:
         cleaned_bin, inferred_bin = _clean_destination(str(bin_dir), "--bin-dir")
         if inferred_bin is not None and not force:
             force = inferred_bin
-        resolved_bin = Path(cleaned_bin).resolve()
+        resolved_bin = _lexical_abspath(cleaned_bin)
     else:
-        resolved_bin = default_bin_dir().resolve()
+        resolved_bin = _lexical_abspath(default_bin_dir())
 
     resolved_skill: Path | None = None
     if include_skill:
-        resolved_skill = resolve_skill_dir(harness=harness, workspace=workspace, skill_dir=skill_dir).resolve()
+        resolved_skill = _lexical_abspath(resolve_skill_dir(harness=harness, workspace=workspace, skill_dir=skill_dir))
+
+    harness_root: Path | None = None
+    noether_agent_path: Path | None = None
+    dashboard_skill_dir: Path | None = None
+    if with_noether:
+        harness_root, noether_agent_path, dashboard_skill_dir = resolve_noether_targets(
+            harness=harness,
+            workspace=workspace,
+        )
 
     package, sources = _resolve_sources(source_package, source_skill)
     targets = [resolved_runtime, resolved_bin]
     if resolved_skill is not None:
         targets.append(resolved_skill)
+    if noether_agent_path is not None and dashboard_skill_dir is not None:
+        targets.extend((noether_agent_path, dashboard_skill_dir))
     _check_source_overlap(targets, sources)
 
     cmd_shim = resolved_bin / "chat-report.cmd"
     posix_shim = resolved_bin / "chat-report"
+
+    _assert_regular_dir_target(resolved_runtime)
+    _assert_regular_dir_target(resolved_bin)
+    if resolved_skill is not None:
+        _assert_regular_dir_target(resolved_skill)
+    if dashboard_skill_dir is not None:
+        _assert_regular_dir_target(dashboard_skill_dir)
+    _assert_regular_file_target(cmd_shim)
+    _assert_regular_file_target(posix_shim)
+    if noether_agent_path is not None:
+        _assert_regular_file_target(noether_agent_path)
+
     if resolved_runtime.exists() and any(resolved_runtime.iterdir()) and not force:
         raise ValueError(f"Runtime destination is non-empty ({resolved_runtime}); pass --force to replace it.")
     if (cmd_shim.exists() or posix_shim.exists()) and not force:
         raise ValueError(f"CLI shim already exists in {resolved_bin}; pass --force to replace it.")
     if resolved_skill is not None and resolved_skill.exists() and any(resolved_skill.iterdir()) and not force:
         raise ValueError(f"Skill destination is non-empty ({resolved_skill}); pass --force to replace it.")
+    if noether_agent_path is not None and noether_agent_path.exists() and not force:
+        raise ValueError(f"Agent destination already exists ({noether_agent_path}); pass --force to replace it.")
+    if dashboard_skill_dir is not None and dashboard_skill_dir.exists() and any(dashboard_skill_dir.iterdir()) and not force:
+        raise ValueError(f"Dashboard skill destination is non-empty ({dashboard_skill_dir}); pass --force to replace it.")
 
     cmd_text = render_cmd_shim(resolved_runtime)
     posix_text = render_posix_shim(resolved_runtime)
+    agent_md_text = _read_noether_agent_md(package) if with_noether else ""
+
+    dir_ancestor_targets = [resolved_runtime, resolved_bin]
+    if resolved_skill is not None:
+        dir_ancestor_targets.append(resolved_skill)
+    if noether_agent_path is not None and dashboard_skill_dir is not None:
+        dir_ancestor_targets.extend((noether_agent_path.parent, dashboard_skill_dir))
+    created_ancestors = _collect_created_ancestors(dir_ancestor_targets)
 
     token = uuid.uuid4().hex
-    runtime_backup: Path | None = None
-    runtime_swapped = False
-    skill_backup: Path | None = None
-    shim_stages: list[Path] = []
-    shim_backups: list[tuple[Path, Path | None]] = []
+    stage_files: list[Path] = []
+    file_backups: list[tuple[Path, Path | None]] = []
+    dir_backups: list[tuple[Path, Path | None]] = []
 
     try:
         runtime_backup = _atomic_replace_dir(
@@ -701,7 +911,7 @@ def install_cli(
             rmtree_fn=rmtree_fn,
             token=token,
         )
-        runtime_swapped = True
+        dir_backups.append((resolved_runtime, runtime_backup))
 
         resolved_bin.mkdir(parents=True, exist_ok=True)
         for shim_path, content, is_exec in (
@@ -710,15 +920,14 @@ def install_cli(
         ):
             stage_file = resolved_bin / f".{shim_path.name}.stage.{token}"
             bak_file = resolved_bin / f".{shim_path.name}.bak.{token}"
-            shim_stages.append(stage_file)
+            stage_files.append(stage_file)
             stage_file.write_text(content, encoding="utf-8", newline="\n")
             if is_exec:
                 stage_file.chmod(0o755)
-            had_shim = False
-            if shim_path.exists():
+            had_existing = shim_path.exists()
+            file_backups.append((shim_path, bak_file if had_existing else None))
+            if had_existing:
                 replace_fn(shim_path, bak_file)
-                had_shim = True
-            shim_backups.append((shim_path, bak_file if had_shim else None))
             replace_fn(stage_file, shim_path)
 
         if resolved_skill is not None:
@@ -729,30 +938,61 @@ def install_cli(
                 rmtree_fn=rmtree_fn,
                 token=token,
             )
+            dir_backups.append((resolved_skill, skill_backup))
+
+        if noether_agent_path is not None and dashboard_skill_dir is not None:
+            noether_agent_path.parent.mkdir(parents=True, exist_ok=True)
+            stage_agent = noether_agent_path.parent / f".{noether_agent_path.name}.stage.{token}"
+            bak_agent = noether_agent_path.parent / f".{noether_agent_path.name}.bak.{token}"
+            stage_files.append(stage_agent)
+            stage_agent.write_text(agent_md_text, encoding="utf-8", newline="\n")
+            had_existing = noether_agent_path.exists()
+            file_backups.append((noether_agent_path, bak_agent if had_existing else None))
+            if had_existing:
+                replace_fn(noether_agent_path, bak_agent)
+            replace_fn(stage_agent, noether_agent_path)
+
+            dash_backup = _atomic_replace_dir(
+                dashboard_skill_dir,
+                lambda stage: _copy_dashboard_skill(stage, package),
+                replace_fn=replace_fn,
+                rmtree_fn=rmtree_fn,
+                token=token,
+            )
+            dir_backups.append((dashboard_skill_dir, dash_backup))
     except BaseException:
-        for stage_file in shim_stages:
+        for stage_file in stage_files:
             stage_file.unlink(missing_ok=True)
-        for shim_path, bak_file in reversed(shim_backups):
+        for file_path, bak_file in reversed(file_backups):
             try:
-                if shim_path.exists():
-                    shim_path.unlink()
-                if bak_file is not None and bak_file.exists():
-                    replace_fn(bak_file, shim_path)
+                if bak_file is None:
+                    file_path.unlink(missing_ok=True)
+                elif bak_file.exists():
+                    file_path.unlink(missing_ok=True)
+                    replace_fn(bak_file, file_path)
             except OSError as rollback_exc:
                 print(
-                    f"[chat-report] WARNING: shim rollback failed to restore {shim_path}: {rollback_exc}",
+                    f"[chat-report] WARNING: shim rollback failed to restore {file_path}: {rollback_exc}",
                     file=sys.stderr,
                 )
-        if runtime_swapped:
-            _rollback_dir(resolved_runtime, runtime_backup, replace_fn=replace_fn, rmtree_fn=rmtree_fn)
+        for dir_path, dir_bak in reversed(dir_backups):
+            _rollback_dir(dir_path, dir_bak, replace_fn=replace_fn, rmtree_fn=rmtree_fn)
+        for created_dir in reversed(created_ancestors):
+            try:
+                if created_dir.exists() and created_dir.is_dir() and not any(created_dir.iterdir()):
+                    created_dir.rmdir()
+            except OSError:
+                pass
         raise
     else:
-        _cleanup_dir_backup(runtime_backup, rmtree_fn=rmtree_fn)
-        _cleanup_dir_backup(skill_backup, rmtree_fn=rmtree_fn)
-        for _, bak_file in shim_backups:
+        for _, dir_bak in dir_backups:
+            _cleanup_dir_backup(dir_bak, rmtree_fn=rmtree_fn)
+        for _, bak_file in file_backups:
             if bak_file is not None and bak_file.exists():
                 bak_file.unlink(missing_ok=True)
 
+    if harness_root is not None:
+        _warn_if_pars_missing(harness_root)
     if not _is_dir_on_path(resolved_bin):
         print(
             f"[chat-report] WARNING: bin-dir-not-on-path: {resolved_bin} is not on PATH; "
@@ -854,7 +1094,7 @@ def _normalize_install_argv(argv: list[str]) -> list[str]:
             normalized.append(f"--force={value.strip().lower()}")
             index += 1
             continue
-        if token in {"--install", "--install-skill", "--no-skill"}:
+        if token in {"--install", "--install-skill", "--no-skill", "--with-noether"}:
             if index + 1 < len(argv) and argv[index + 1].strip().lower() in _BOOL_LITERALS:
                 if argv[index + 1].strip().lower() in _TRUE_LITERALS:
                     normalized.append(token)
@@ -865,7 +1105,7 @@ def _normalize_install_argv(argv: list[str]) -> list[str]:
             continue
         if "=" in token:
             flag, value = token.split("=", 1)
-            if flag in {"--install", "--install-skill", "--no-skill"}:
+            if flag in {"--install", "--install-skill", "--no-skill", "--with-noether"}:
                 if _parse_force_bool(value):
                     normalized.append(flag)
                 index += 1
@@ -901,6 +1141,7 @@ def handle_install_argv(
     parser.add_argument("--runtime-dir", default=None)
     parser.add_argument("--skill-dir", default=None)
     parser.add_argument("--no-skill", action="store_true")
+    parser.add_argument("--with-noether", action="store_true")
     parser.add_argument("--workspace", default=None)
     parser.add_argument("--harness", default="cursor")
     parser.add_argument("--force", "-f", dest="force_values", action="append", default=[])
@@ -932,11 +1173,19 @@ def handle_install_argv(
             skill_dir=known.skill_dir,
             harness=known.harness,
             workspace=known.workspace,
+            with_noether=known.with_noether,
             force=force,
             source_package=source_package,
             source_skill=source_skill,
         )
         print(skill_path)
+        if known.with_noether:
+            _, noether_agent_path, dashboard_skill_dir = resolve_noether_targets(
+                harness=known.harness,
+                workspace=known.workspace,
+            )
+            print(noether_agent_path)
+            print(dashboard_skill_dir)
         return
 
     runtime_path, bin_path, skill_path = install_cli(
@@ -946,6 +1195,7 @@ def handle_install_argv(
         harness=known.harness,
         workspace=known.workspace,
         include_skill=not known.no_skill,
+        with_noether=known.with_noether,
         force=force,
         source_package=source_package,
         source_skill=source_skill,
@@ -954,3 +1204,10 @@ def handle_install_argv(
     print(bin_path)
     if skill_path is not None:
         print(skill_path)
+    if known.with_noether:
+        _, noether_agent_path, dashboard_skill_dir = resolve_noether_targets(
+            harness=known.harness,
+            workspace=known.workspace,
+        )
+        print(noether_agent_path)
+        print(dashboard_skill_dir)

@@ -44,10 +44,10 @@ python -m chat_report --aggregate <id1> <id2>
 python -m chat_report --validate <path/to/report.json>
 
 # Install global runtime + CLI shims + lightweight User skill (or Workspace skill with --workspace)
-python -m chat_report --install [--bin-dir <dir>] [--runtime-dir <dir>] [--workspace <dir>] [--force]
+python -m chat_report --install [--bin-dir <dir>] [--runtime-dir <dir>] [--workspace <dir>] [--with-noether] [--force]
 
 # Install or refresh only the lightweight SKILL.md (defaults to User scope; Workspace with --workspace)
-python -m chat_report --install-skill [--workspace <dir>] [--skill-dir <dir>] [--force]
+python -m chat_report --install-skill [--workspace <dir>] [--skill-dir <dir>] [--with-noether] [--force]
 
 # Install a self-contained skill bundle into a destination directory
 python -m chat_report --bundle-into <dest_skill_dir> --force
@@ -74,6 +74,7 @@ python -m chat_report --bundle-into <dest_skill_dir> --force
 | `--runtime-dir <dir>`      | OS user data dir             | Directory for the standalone `chat_report` runtime during `--install`.                     |
 | `--skill-dir <dir>`        | Scope default                | Explicit destination directory for `SKILL.md` during `--install` / `--install-skill`.      |
 | `--no-skill`               | `False`                      | Skip `SKILL.md` installation during `--install`.                                           |
+| `--with-noether`           | `False`                      | Install `noether-analyst` agent and `chat-report-dashboard` skill during `--install` or `--install-skill` (`--harness cursor` only). |
 | `--force`, `-f`            | `False`                      | Overwrite existing targets during `--install`, `--install-skill`, or `--bundle-into`.      |
 | `--verbose`                | `False`                      | Print diagnostic parse warnings to stderr.                                                 |
 | `-V`, `--version`          | -                            | Print `chat-report n.n.n (schema n.n)` and exit.                                           |

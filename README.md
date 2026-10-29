@@ -77,7 +77,7 @@ python -m chat_report --validate path/to/report.json
 | `--tracking-db <path>`     | Explicit path to Cursor `ai-code-tracking.db`.                                                                                                         |
 | `--denial-marker <str>`    | Repeatable custom hook or harness denial substring marker.                                                                                             |
 | `--verbose`                | Enable verbose diagnostic output.                                                                                                                      |
-| `-V`, `--version`          | Print the package and schema version (`chat-report 2.0.2 (schema 2.0)`) and exit.                                                                      |
+| `-V`, `--version`          | Print the package and schema version (`chat-report 2.0.3 (schema 2.0)`) and exit.                                                                      |
 
 ### Environment Variables
 
@@ -132,33 +132,33 @@ Offline validation (`--validate <json_path>`) enforces all structural keys, stat
 The `skills/chat-report/SKILL.md` skill implements a two-stage token-bounded workflow:
 
 1. **Stage 1 (Deterministic CLI + Digest):** Run `python "<skill_dir>/scripts/run.py" --latest --agent-digest` in a single shell call. If Stage 1 reports zero `HIGH`/`MEDIUM` findings and zero `H08` friction signals, and the user did not ask why a customization or tool failed or request a deep root-cause audit, return the summary and report link immediately with zero subagent dispatches.
-2. **Stage 2 (Conditional Subagent Dispatch):** When `H01` through `H08` findings fire or the user asks why a skill, rule, hook, or tool failed or was ignored, dispatch the `Customization & Harness Conflict Auditor` subagent with the generated `<session_id>.json` report and touched customization files to produce a structured Root Cause, Conflicting Directives, and Proposed Diff report. An optional `Onboarding Walkthrough Coach` subagent is available when the user requests an educational walkthrough.
+2. **Stage 2 (Conditional Subagent Dispatch):** When `H01` through `H08` findings fire or the user asks why a skill, rule, hook, or tool failed or was ignored, dispatch the `Customization & Harness Conflict Auditor` subagent with the generated `<session_id>.json` report and touched customization files to produce a structured Root Cause, Conflicting Directives, and Proposed Diff report. Dispatch the `noether-analyst` subagent alongside the Auditor (or when the user asks for a metrics, performance, efficiency, or efficacy report or a dashboard) to produce `<session_id>.noether.md`, `<session_id>.metrics.json`, and an optional Cursor canvas dashboard via `chat-report-dashboard`. An optional `Onboarding Walkthrough Coach` subagent is available when the user requests an educational walkthrough.
 
 ### Installing Globally or Bundling a Portable Skill
 
 `chat_report` supports three installation modes:
 
 1. **Global CLI + Lightweight Skill (`--install`):**
-   Installs the standalone runtime into the OS user data directory (`%LOCALAPPDATA%\chat-report` on Windows, `~/.local/share/chat-report` on POSIX), writes `chat-report.cmd` and `chat-report` launcher shims into `--bin-dir` (default `~/.local/bin`, or e.g. `C:\cmd`), and installs a lightweight `SKILL.md` (which invokes `chat-report` directly without a bundled `scripts/` copy) into User scope (`~/.cursor/skills/chat-report/SKILL.md`) by default, or Workspace scope (`<workspace>/.cursor/skills/chat-report/SKILL.md`) when `--workspace <dir>` is passed:
+   Installs the standalone runtime into the OS user data directory (`%LOCALAPPDATA%\chat-report` on Windows, `~/.local/share/chat-report` on POSIX), writes `chat-report.cmd` and `chat-report` launcher shims into `--bin-dir` (default `~/.local/bin`, or e.g. `C:\cmd`), and installs a lightweight `SKILL.md` (which invokes `chat-report` directly without a bundled `scripts/` copy) into User scope (`~/.cursor/skills/chat-report/SKILL.md`) by default, or Workspace scope (`<workspace>/.cursor/skills/chat-report/SKILL.md`) when `--workspace <dir>` is passed. Add `--with-noether` to also install `agents/noether-analyst.md` and `skills/chat-report-dashboard/`:
 
    ```powershell
-   # Install runtime, shims in C:\cmd, and lightweight User-scope skill
-   python -m chat_report --install --bin-dir C:\cmd --force
+   # Install runtime, shims in C:\cmd, lightweight User-scope skill, and Noether assets
+   python -m chat_report --install --bin-dir C:\cmd --with-noether --force
 
    # Or install via pipx / uv tool / pip (using pyproject.toml) and drop the lightweight skill
    uv tool install .
-   chat-report --install-skill --force
+   chat-report --install-skill --with-noether --force
    ```
 
 2. **Lightweight Skill Only (`--install-skill`):**
-   Writes or refreshes only the lightweight `SKILL.md` (calling `chat-report`) into User scope by default or Workspace scope when `--workspace <dir>` is supplied:
+   Writes or refreshes only the lightweight `SKILL.md` (calling `chat-report`) into User scope by default or Workspace scope when `--workspace <dir>` is supplied (plus `agents/noether-analyst.md` and `skills/chat-report-dashboard/` when `--with-noether` is passed):
 
    ```powershell
    # Default User scope (~/.cursor/skills/chat-report/SKILL.md)
-   python -m chat_report --install-skill [--force]
+   python -m chat_report --install-skill [--with-noether] [--force]
 
    # Workspace scope (<workspace>/.cursor/skills/chat-report/SKILL.md)
-   python -m chat_report --install-skill --workspace <workspace_dir> [--force]
+   python -m chat_report --install-skill --workspace <workspace_dir> [--with-noether] [--force]
    ```
 
 3. **Self-Contained Portable Skill Bundle (`--bundle-into`):**
@@ -175,9 +175,9 @@ All three modes stage files into sibling temporary directories and swap targets 
 
 ## Versioning and Release Policy
 
-- **Package version (`chat_report.__version__`):** Uses Semantic Versioning (`MAJOR.MINOR.PATCH`, currently `2.0.2`). Run `python -m chat_report --version` (or `-V`) to inspect the installed package and schema version.
+- **Package version (`chat_report.__version__`):** Uses Semantic Versioning (`MAJOR.MINOR.PATCH`, currently `2.0.3`). Run `python -m chat_report --version` (or `-V`) to inspect the installed package and schema version.
 - **Report contract version (`SCHEMA_VERSION` / `schema_version`):** Currently `"2.0"`, enforced offline by `python -m chat_report --validate <report.json>`. Breaking changes to report structure, field types, or arithmetic invariants increment the schema version. Backward-compatible bug fixes and internal adapter refinements increment the package minor or patch version.
-- **Git release tags:** Annotated git tags (`v<MAJOR>.<MINOR>.<PATCH>`, such as `v0.1.0`, `v2.0.0`, `v2.0.1`, and `v2.0.2`) mark verified release milestones on `master`.
+- **Git release tags:** Annotated git tags (`v<MAJOR>.<MINOR>.<PATCH>`, such as `v0.1.0`, `v2.0.0`, `v2.0.1`, `v2.0.2`, and `v2.0.3`) mark verified release milestones on `master`.
 
 ---
 

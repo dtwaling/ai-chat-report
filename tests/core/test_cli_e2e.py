@@ -335,7 +335,7 @@ def test_cli_boolean_flag_values_and_quoted_paths(tmp_path: Path) -> None:
 
 
 def test_version_constants_and_cli_version_flags() -> None:
-    assert chat_report.__version__ == "2.0.2"
+    assert chat_report.__version__ == "2.0.3"
     assert chat_report.SCHEMA_VERSION == "2.0"
     assert SCHEMA_VERSION == "2.0"
     repository = Path(__file__).parents[2]
@@ -354,7 +354,7 @@ def test_version_constants_and_cli_version_flags() -> None:
                 check=True,
             )
             assert result.returncode == 0
-            assert result.stdout.strip() == "chat-report 2.0.2 (schema 2.0)"
+            assert result.stdout.strip() == "chat-report 2.0.3 (schema 2.0)"
 
 
 def test_skill_assets_sync_and_lightweight_rendering() -> None:
@@ -363,6 +363,18 @@ def test_skill_assets_sync_and_lightweight_rendering() -> None:
     packaged_skill = (repository / "chat_report" / "assets" / "SKILL.md").read_text(encoding="utf-8")
     assert repo_skill == packaged_skill
     assert repo_skill.count('python "<skill_dir>/scripts/run.py"') == 5
+
+    expected_digests = {
+        repository / "skills" / "chat-report" / "SKILL.md": "0e03cb760bad92f41e78eca84318cb6a2fcef0d8d81100a2f5d5b82a6c1fcb8f",
+        repository / "chat_report" / "assets" / "SKILL.md": "0e03cb760bad92f41e78eca84318cb6a2fcef0d8d81100a2f5d5b82a6c1fcb8f",
+        repository / "chat_report" / "assets" / "agents" / "noether-analyst.md": "c0b2c4a75f7a02b8e01ed9d72b01e46debc236250b206848d88217e74a0bb51c",
+        repository / "chat_report" / "assets" / "skills" / "chat-report-dashboard" / "SKILL.md": "e08d94d7adb600ebae561159a56c68cc3ab9e4a4f845616f00789e0646f08c84",
+        repository / "chat_report" / "assets" / "skills" / "chat-report-dashboard" / "template.canvas.tsx": "2be01448db7b2f30b520c15ea200427c95ac4b57160e50d59cbbb55c6c2c495a",
+    }
+    for path, expected_sha in expected_digests.items():
+        normalized = path.read_text(encoding="utf-8").replace("\r\n", "\n").encode("utf-8")
+        assert hashlib.sha256(normalized).hexdigest() == expected_sha
+
     lightweight = installer.render_lightweight_skill_md()
     assert "<skill_dir>/scripts/run.py" not in lightweight
     for expected_cmd in (
@@ -429,7 +441,7 @@ def test_global_install_shims_path_diagnostics_and_skill_scopes(
         text=True,
         check=True,
     )
-    assert ver_res.stdout.strip() == "chat-report 2.0.2 (schema 2.0)"
+    assert ver_res.stdout.strip() == "chat-report 2.0.3 (schema 2.0)"
 
     state = create_synthetic_state_db(tmp_path / "state.vscdb")
     tracking = create_synthetic_tracking_db(tmp_path / "tracking.db")
@@ -482,7 +494,7 @@ def test_global_install_shims_path_diagnostics_and_skill_scopes(
             text=True,
             check=True,
         )
-        assert fb_res.stdout.strip() == "chat-report 2.0.2 (schema 2.0)"
+        assert fb_res.stdout.strip() == "chat-report 2.0.3 (schema 2.0)"
 
         # And when no compatible Python 3.10+ interpreter exists on PATH
         empty_bin = tmp_path / "empty_bin"
@@ -513,7 +525,7 @@ def test_global_install_shims_path_diagnostics_and_skill_scopes(
             text=True,
             check=True,
         )
-        assert fb_res.stdout.strip() == "chat-report 2.0.2 (schema 2.0)"
+        assert fb_res.stdout.strip() == "chat-report 2.0.3 (schema 2.0)"
 
     # --no-skill skips creating skill dir
     no_skill_rt = tmp_path / "rt_no_skill"
@@ -768,6 +780,9 @@ def test_wheel_build_and_isolated_console_script_execution(tmp_path: Path) -> No
     console_exe = next((item for item in bin_candidates if item.is_file()), None)
     assert console_exe is not None
     assert (install_target / "chat_report" / "assets" / "SKILL.md").is_file()
+    assert (install_target / "chat_report" / "assets" / "agents" / "noether-analyst.md").is_file()
+    assert (install_target / "chat_report" / "assets" / "skills" / "chat-report-dashboard" / "SKILL.md").is_file()
+    assert (install_target / "chat_report" / "assets" / "skills" / "chat-report-dashboard" / "template.canvas.tsx").is_file()
 
     isolated_env = dict(os.environ)
     isolated_env["PYTHONPATH"] = str(install_target)
@@ -780,12 +795,14 @@ def test_wheel_build_and_isolated_console_script_execution(tmp_path: Path) -> No
         text=True,
         check=True,
     )
-    assert ver_res.stdout.strip() == "chat-report 2.0.2 (schema 2.0)"
+    assert ver_res.stdout.strip() == "chat-report 2.0.3 (schema 2.0)"
 
-    # Verify --install-skill and --bundle-into work from the isolated wheel without repo skills/
+    # Verify --install-skill (with --with-noether) and --bundle-into work from the isolated wheel without repo skills/
+    wheel_ws = tmp_path / "wheel_ws"
+    wheel_ws.mkdir()
     wheel_skill = tmp_path / "wheel_skill"
     subprocess.run(
-        [str(console_exe), "--install-skill", "--skill-dir", str(wheel_skill)],
+        [str(console_exe), "--install-skill", "--skill-dir", str(wheel_skill), "--workspace", str(wheel_ws), "--with-noether"],
         cwd=tmp_path,
         env=isolated_env,
         capture_output=True,
@@ -794,6 +811,9 @@ def test_wheel_build_and_isolated_console_script_execution(tmp_path: Path) -> No
     )
     assert (wheel_skill / "SKILL.md").is_file()
     assert "chat-report --latest --agent-digest" in (wheel_skill / "SKILL.md").read_text(encoding="utf-8")
+    assert (wheel_ws / ".cursor" / "agents" / "noether-analyst.md").is_file()
+    assert (wheel_ws / ".cursor" / "skills" / "chat-report-dashboard" / "SKILL.md").is_file()
+    assert (wheel_ws / ".cursor" / "skills" / "chat-report-dashboard" / "template.canvas.tsx").is_file()
 
     wheel_bundle = tmp_path / "wheel_bundle"
     subprocess.run(
@@ -807,5 +827,151 @@ def test_wheel_build_and_isolated_console_script_execution(tmp_path: Path) -> No
     assert (wheel_bundle / "SKILL.md").is_file()
     assert (wheel_bundle / "scripts" / "run.py").is_file()
     assert (wheel_bundle / "scripts" / "chat_report" / "cli.py").is_file()
+
+
+def test_with_noether_scopes_warnings_restrictions_and_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+
+    # 1. Invalid flag combinations
+    assert main(["--bundle-into", str(tmp_path / "bad_bundle"), "--with-noether"]) == 1
+    assert main(["--install-skill", "--with-noether", "--harness", "other"]) == 1
+    assert main(["--install", "--with-noether", "--harness", "other"]) == 1
+    with pytest.raises(SystemExit) as report_err:
+        main(["--latest", "--with-noether"])
+    assert report_err.value.code == 2
+
+    # 2. User-scope --install --with-noether emits pars-skill-missing when pars is absent
+    rt_dir = tmp_path / "noether_rt"
+    bin_dir = tmp_path / "noether_bin"
+    capsys.readouterr()
+    assert main(["--install", "--runtime-dir", str(rt_dir), "--bin-dir", str(bin_dir), "--with-noether"]) == 0
+    captured = capsys.readouterr()
+    assert "pars-skill-missing" in captured.err
+    user_agent = fake_home / ".cursor" / "agents" / "noether-analyst.md"
+    user_dash = fake_home / ".cursor" / "skills" / "chat-report-dashboard"
+    assert str(user_agent) in captured.out
+    assert str(user_dash) in captured.out
+    assert user_agent.is_file()
+    assert (user_dash / "SKILL.md").is_file()
+    assert (user_dash / "template.canvas.tsx").is_file()
+
+    # Overwrite refusal without --force
+    assert main(["--install", "--runtime-dir", str(rt_dir), "--bin-dir", str(bin_dir), "--with-noether"]) == 1
+    assert main(["--install-skill", "--with-noether"]) == 1
+    capsys.readouterr()
+
+    # 3. Create pars skill in user scope -> warning disappears on --install-skill --with-noether --force
+    pars_md = fake_home / ".cursor" / "skills" / "pars" / "SKILL.md"
+    pars_md.parent.mkdir(parents=True, exist_ok=True)
+    pars_md.write_text("# PARS\n", encoding="utf-8")
+    assert main(["--install-skill", "--with-noether", "--force"]) == 0
+    captured_force = capsys.readouterr()
+    assert "pars-skill-missing" not in captured_force.err
+    assert str(user_agent) in captured_force.out
+    assert str(user_dash) in captured_force.out
+
+    # 4. Workspace-scope --install-skill --with-noether
+    ws_dir = tmp_path / "ws_noether"
+    ws_dir.mkdir()
+    assert main(["--install-skill", "--workspace", str(ws_dir), "--with-noether"]) == 0
+    ws_agent = ws_dir / ".cursor" / "agents" / "noether-analyst.md"
+    ws_dash = ws_dir / ".cursor" / "skills" / "chat-report-dashboard"
+    assert ws_agent.is_file()
+    assert (ws_dash / "SKILL.md").is_file()
+    assert (ws_dash / "template.canvas.tsx").is_file()
+
+    # 5. Pre-flight wrong-type rejection (directory at file target, file at directory target)
+    bad_ws = tmp_path / "bad_ws_types"
+    (bad_ws / ".cursor" / "agents" / "noether-analyst.md").mkdir(parents=True)
+    with pytest.raises(ValueError, match="Expected regular file target"):
+        installer.install_skill(workspace=bad_ws, with_noether=True, force=True)
+
+    bad_ws2 = tmp_path / "bad_ws_types2"
+    (bad_ws2 / ".cursor" / "skills").mkdir(parents=True)
+    (bad_ws2 / ".cursor" / "skills" / "chat-report-dashboard").write_text("not a dir", encoding="utf-8")
+    with pytest.raises(ValueError, match="Expected regular directory target"):
+        installer.install_skill(workspace=bad_ws2, with_noether=True, force=True)
+
+    bad_bin_file = tmp_path / "bin_is_a_file"
+    bad_bin_file.write_text("file instead of dir", encoding="utf-8")
+    with pytest.raises(ValueError, match="Expected regular directory target"):
+        installer.install_cli(runtime_dir=tmp_path / "rt_ok", bin_dir=bad_bin_file, force=True)
+
+    # 6. Multi-stage rollback & created_ancestors cleanup
+    # 6a: Fresh workspace where .cursor/ does not exist yet; failure during dashboard swap cleans up .cursor/
+    fresh_ws = tmp_path / "fresh_ws_rollback"
+    fresh_ws.mkdir()
+    real_replace = os.replace
+
+    def fail_on_dashboard_stage_move(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        if "chat-report-dashboard" in str(dst) and ".stage." in str(src):
+            raise OSError("simulated dashboard stage swap failure")
+        real_replace(src, dst)
+
+    with pytest.raises(OSError, match="simulated dashboard stage swap failure"):
+        installer.install_skill(
+            workspace=fresh_ws,
+            with_noether=True,
+            force=True,
+            replace_fn=fail_on_dashboard_stage_move,
+        )
+    assert not (fresh_ws / ".cursor").exists()
+
+    # 6b: Existing installation rollback across all 3 failure stages:
+    # Stage A: Failure when backing up existing noether-analyst.md (step 4) -> existing agent file must remain untouched!
+    ws_agent.write_text("custom_agent_v1", encoding="utf-8")
+    (ws_dash / "SKILL.md").write_text("custom_dash_v1", encoding="utf-8")
+    ws_skill_md = ws_dir / ".cursor" / "skills" / "chat-report" / "SKILL.md"
+    ws_skill_md.write_text("custom_skill_v1", encoding="utf-8")
+
+    def fail_on_agent_backup(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        if Path(src).name == "noether-analyst.md" and ".bak." in Path(dst).name:
+            raise OSError("simulated agent backup failure")
+        real_replace(src, dst)
+
+    with pytest.raises(OSError, match="simulated agent backup failure"):
+        installer.install_skill(
+            workspace=ws_dir,
+            with_noether=True,
+            force=True,
+            replace_fn=fail_on_agent_backup,
+        )
+    assert ws_agent.read_text(encoding="utf-8") == "custom_agent_v1"
+    assert (ws_dash / "SKILL.md").read_text(encoding="utf-8") == "custom_dash_v1"
+    assert ws_skill_md.read_text(encoding="utf-8") == "custom_skill_v1"
+
+    # Stage B: Failure after agent backup before stage->agent swap (step 5) -> restores agent from backup
+    def fail_on_agent_stage_swap(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        if ".noether-analyst.md.stage." in Path(src).name and Path(dst).name == "noether-analyst.md":
+            raise OSError("simulated agent stage swap failure")
+        real_replace(src, dst)
+
+    with pytest.raises(OSError, match="simulated agent stage swap failure"):
+        installer.install_skill(
+            workspace=ws_dir,
+            with_noether=True,
+            force=True,
+            replace_fn=fail_on_agent_stage_swap,
+        )
+    assert ws_agent.read_text(encoding="utf-8") == "custom_agent_v1"
+    assert (ws_dash / "SKILL.md").read_text(encoding="utf-8") == "custom_dash_v1"
+    assert ws_skill_md.read_text(encoding="utf-8") == "custom_skill_v1"
+
+    # Stage C: Failure after agent swap during dashboard swap -> restores agent and skill from backup
+    with pytest.raises(OSError, match="simulated dashboard stage swap failure"):
+        installer.install_skill(
+            workspace=ws_dir,
+            with_noether=True,
+            force=True,
+            replace_fn=fail_on_dashboard_stage_move,
+        )
+    assert ws_agent.read_text(encoding="utf-8") == "custom_agent_v1"
+    assert (ws_dash / "SKILL.md").read_text(encoding="utf-8") == "custom_dash_v1"
+    assert ws_skill_md.read_text(encoding="utf-8") == "custom_skill_v1"
+
 
 

@@ -42,4 +42,6 @@ Give it the generated `<session_id>.json`, the list of triggered H01-H08 finding
 2. Conflicting Directives
 3. Proposed Diff
 
+Dispatch one `noether-analyst` subagent when the Auditor runs, or when the user asks for a metrics, performance, efficiency, or efficacy report or a dashboard, even when Stage 1 reports zero findings. Give it the `<session_id>.json` path, the digest, the user's stated goal for the session, and `dashboard: yes` when the user asked for a canvas or dashboard. When both run, dispatch them in one parallel wave. It returns the paths of `<session_id>.noether.md`, `<session_id>.metrics.json`, and the canvas when requested; link each in the response.
+
 Only when the user explicitly requests onboarding or an under-the-hood teaching guide, also dispatch the optional `generalPurpose` `Onboarding Walkthrough Coach`. It should explain prompt token budget, rule and skill loading, the tool execution waterfall, and actionable customization and prompting takeaways.
