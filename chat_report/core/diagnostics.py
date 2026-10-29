@@ -7,7 +7,7 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
-from chat_report.core.classifier import canonicalize_path, is_skill_path
+from chat_report.core.classifier import canonicalize_customizations, canonicalize_path, is_skill_path
 from chat_report.core.ir import CustomizationRefIR, DiagnosticFinding, HEURISTIC_IDS, SEVERITY_RANK, SessionIR, ToolCallIR, TurnIR, normalize_session_id
 
 
@@ -165,17 +165,17 @@ def _h01(session: SessionIR, workspace: Path | None, calls: list[ToolCallIR]) ->
     attached_skill_refs = [ref for ref in session.customizations if ref.kind == "skill" and ref.source == "context_attached"]
     known_skill_refs = [ref for ref in session.customizations if ref.kind == "skill" and ref.source in {"context_attached", "workspace_active"}]
     read_paths = {
-        canonicalize_path(call.target_path, workspace).lower()
+        canonicalize_customizations(call.target_path, workspace).lower()
         for call in calls
         if (call.semantic_class == "skill-read" or (call.canonical_kind == "file_read" and is_skill_path(call.target_path))) and not call.is_error
     }
     read_paths.update(
-        canonicalize_path(ref.path, workspace).lower()
+        canonicalize_customizations(ref.path, workspace).lower()
         for ref in session.customizations
         if ref.kind == "skill" and ref.source == "explicit_read"
     )
-    read_paths.update(canonicalize_path(path, workspace).lower() for sub in session.subagents for path in sub.skills_read)
-    known_paths = {canonicalize_path(ref.path, workspace).lower() for ref in known_skill_refs}
+    read_paths.update(canonicalize_customizations(path, workspace).lower() for sub in session.subagents for path in sub.skills_read)
+    known_paths = {canonicalize_customizations(ref.path, workspace).lower() for ref in known_skill_refs}
     non_inlined_manual_turns: dict[str, TurnIR] = {}
     for turn in session.turns:
         manual_sections = re.findall(r"<manually_attached_skills>(.*?)</manually_attached_skills>", turn.user_text, re.S | re.I)
@@ -183,13 +183,13 @@ def _h01(session: SessionIR, workspace: Path | None, calls: list[ToolCallIR]) ->
         tag_manual_paths: list[str] = []
         for section in manual_sections:
             inlined_for_section = {
-                canonicalize_path(m.strip(), workspace).lower()
+                canonicalize_customizations(m.strip(), workspace).lower()
                 for m in re.findall(r"^\s*Path\s*:\s*(.+?)\s*(?:\r?\n)+\s*SKILL\.md\s+content\s*:", section, re.M | re.I)
             }
             for match in re.findall(r"^\s*Path\s*:\s*(.+?)\s*$", section, re.M | re.I):
                 cleaned_path = match.strip()
                 inline_paths.append(cleaned_path)
-                canon_inline = canonicalize_path(cleaned_path, workspace).lower()
+                canon_inline = canonicalize_customizations(cleaned_path, workspace).lower()
                 if is_skill_path(canon_inline):
                     if canon_inline in inlined_for_section:
                         read_paths.add(canon_inline)
@@ -197,11 +197,11 @@ def _h01(session: SessionIR, workspace: Path | None, calls: list[ToolCallIR]) ->
                         non_inlined_manual_turns.setdefault(canon_inline, turn)
             for raw_tag_path in re.findall(r'<agent_skill\s+fullPath=["\']([^"\']+)["\']', section, re.I):
                 tag_manual_paths.append(raw_tag_path)
-                canon_tag = canonicalize_path(raw_tag_path, workspace).lower()
+                canon_tag = canonicalize_customizations(raw_tag_path, workspace).lower()
                 if is_skill_path(canon_tag):
                     non_inlined_manual_turns.setdefault(canon_tag, turn)
         for raw_path in re.findall(r'<agent_skill\s+fullPath=["\']([^"\']+)["\']', turn.user_text, re.I) + inline_paths:
-            path = canonicalize_path(raw_path, workspace)
+            path = canonicalize_customizations(raw_path, workspace)
             if not is_skill_path(path) or path.lower() in known_paths:
                 continue
             source = "context_attached" if (raw_path in inline_paths or raw_path in tag_manual_paths) else "workspace_active"
@@ -211,9 +211,9 @@ def _h01(session: SessionIR, workspace: Path | None, calls: list[ToolCallIR]) ->
                 attached_skill_refs.append(ref)
             known_paths.add(path.lower())
     findings: list[DiagnosticFinding] = []
-    attached_paths = {canonicalize_path(ref.path, workspace).lower() for ref in attached_skill_refs}
+    attached_paths = {canonicalize_customizations(ref.path, workspace).lower() for ref in attached_skill_refs}
     for ref in sorted(known_skill_refs, key=lambda r: r.path):
-        path = canonicalize_path(ref.path, workspace)
+        path = canonicalize_customizations(ref.path, workspace)
         slug = Path(path).parent.name.lower()
         if not slug:
             continue

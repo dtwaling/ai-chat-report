@@ -109,6 +109,14 @@ def test_h01_read_remains_satisfied_without_workspace(tmp_path: Path) -> None:
     assert not any(f["id"] == HEURISTIC_IDS[0] for f in build_diff_report(session, session)["before"]["diagnostics"]["findings"])
     mixed_case = _session([_call(1, "file_read", path="/Skills/Canvas/SKILL.md")], texts={1: "use canvas skill"}, customizations=[CustomizationRefIR("skill", "/skills/canvas/SKILL.md", "context_attached"), CustomizationRefIR("skill", "SKILL.md", "context_attached")])
     assert not any(f.id == HEURISTIC_IDS[0] for f in evaluate_diagnostics(mixed_case))
+    pointer_stub_read = _session(
+        [_call(1, "file_read", path=str(workspace / ".agents" / "skills" / "canvas.md"))],
+        texts={1: "use canvas skill"},
+        customizations=[CustomizationRefIR("skill", str(skill), "context_attached")],
+    )
+    classify_session(pointer_stub_read, workspace)
+    assert not any(f.id == HEURISTIC_IDS[0] for f in evaluate_diagnostics(pointer_stub_read, workspace))
+    assert not any(f.id == HEURISTIC_IDS[0] for f in evaluate_diagnostics(pointer_stub_read))
 
 
 def test_h02_discovery_filters_and_h03_empty_search() -> None:

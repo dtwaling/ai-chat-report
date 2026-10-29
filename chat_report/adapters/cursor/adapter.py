@@ -112,10 +112,18 @@ def _append_unique(target: list[str], values: list[str]) -> None:
     target.extend(value for value in values if value not in target)
 
 
+_AGENT_SKILL_PATH_RE = re.compile(
+    r"(?:^|/)\.agents/skills/(?P<slug>[^/.][^/]*)(?:/skill)?\.md$",
+    re.IGNORECASE,
+)
+_NON_SKILL_AGENT_STEMS: frozenset[str] = frozenset({"readme", "agents", "claude"})
+
+
 def _customization_kind(path: str) -> str | None:
-    normalized = path.replace("\\", "/").lower()
+    normalized = re.sub(r"/+", "/", path.strip().replace("\\", "/")).lower()
     name = normalized.rsplit("/", 1)[-1]
-    if name == "skill.md":
+    agent_match = _AGENT_SKILL_PATH_RE.search(normalized)
+    if name == "skill.md" or (agent_match is not None and agent_match.group("slug") not in _NON_SKILL_AGENT_STEMS):
         return "skill"
     if name in ("agents.md", "claude.md"):
         return "agent_doc"

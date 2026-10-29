@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from chat_report.core.classifier import canonicalize_path, classify_session, is_rule_path, is_skill_path
+from chat_report.core.classifier import (
+    canonicalize_customizations,
+    canonicalize_path,
+    classify_session,
+    is_rule_path,
+    is_skill_path,
+)
 from chat_report.core.ir import CustomizationRefIR, SessionIR, SubagentSummaryIR, TokenBreakdownIR, ToolCallIR, TurnIR
 
 
@@ -25,8 +31,40 @@ def test_canonicalize_windows_uri_unc_and_posix() -> None:
 
 def test_skill_path_requires_skill_markdown_filename() -> None:
     assert is_skill_path(".cursor/skills/demo/SKILL.md")
+    assert is_skill_path(".agents/skills/github-review-loop.md")
+    assert is_skill_path(r"C:\Work\.agents\skills\powershell.md")
+    assert is_skill_path("file:///C:/Work/.agents/skills/optimus-review.md")
     assert not is_skill_path(".cursor/skills/demo/helper.py")
+    assert not is_skill_path(".agents/skills/demo/helper.py")
+    assert not is_skill_path(".agents/skills/demo/refs/guide.md")
+    assert not is_skill_path(".agents/skills/README.md")
+    assert not is_skill_path(".agents/skills/AGENTS.md")
     assert is_rule_path(".cursor/rules/nested/team-rule.md")
+
+
+def test_canonicalize_customizations_maps_agent_skill_pointer_targets(tmp_path: Path) -> None:
+    workspace = tmp_path
+    stub = workspace / ".cursor" / "skills" / "github-review-loop" / "SKILL.md"
+    target = workspace / ".agents" / "skills" / "github-review-loop.md"
+    stub.parent.mkdir(parents=True)
+    target.parent.mkdir(parents=True)
+    stub.write_text("READ ../../../.agents/skills/github-review-loop.md\n", encoding="utf-8")
+    target.write_text("# Github Review Loop\n", encoding="utf-8")
+
+    expected_ws_skill = canonicalize_path(str(stub), workspace)
+    assert canonicalize_customizations(".agents/skills/github-review-loop.md") == ".cursor/skills/github-review-loop/skill.md"
+    assert canonicalize_customizations(str(target), workspace) == expected_ws_skill
+
+    session = _session(_call("file_read", str(target)))
+    session.customizations = [CustomizationRefIR("skill", "github-review-loop/SKILL.md", "context_attached", 1)]
+    session.subagents = [
+        SubagentSummaryIR("child", 1, None, None, None, "completed", None, 1, 1, 0, 0, [str(target)], []),
+    ]
+    classify_session(session, workspace)
+    assert session.turns[0].tool_calls[0].semantic_class == "skill-read"
+    assert ("skill", expected_ws_skill, "explicit_read") in [(x.kind, x.path, x.source) for x in session.customizations]
+    assert ("skill", expected_ws_skill, "context_attached") in [(x.kind, x.path, x.source) for x in session.customizations]
+    assert session.subagents[0].skills_read == [expected_ws_skill]
 
 
 def test_source_hooks_file_is_not_customization() -> None:

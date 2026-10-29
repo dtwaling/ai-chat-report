@@ -384,10 +384,10 @@ def _classify_latest_candidate(state_con: sqlite3.Connection, session_id: str) -
         completed = [t for t in tfds if str(t.get("status") or "").strip().lower() not in loading_statuses]
         u0 = user_bubbles[0] if user_bubbles else {}
         user_text = f"{u0.get('text') or ''}\n{u0.get('richText') or ''}".lower()
-        if re.search(r"(?<![\w/])/chat-report\b|chat-report/skill\.md", user_text):
+        if re.search(r"(?<![\w/])/chat-report\b|chat-report/skill\.md|\.agents[/\\]+skills[/\\]+chat-report\.md", user_text):
             return True, True
         invocation_re = re.compile(
-            r"chat-report[/\\]+skill\.md|-m\s+chat_report\b|chat-report[/\\]+scripts[/\\]+run\.py|cursor[/\\]+chat-report\.py"
+            r"chat-report[/\\]+skill\.md|\.agents[/\\]+skills[/\\]+chat-report\.md|-m\s+chat_report\b|chat-report[/\\]+scripts[/\\]+run\.py|cursor[/\\]+chat-report\.py"
         )
         if completed and all(
             bool(invocation_re.search(json.dumps(t.get("params") or t.get("rawArgs") or "").lower()))

@@ -329,6 +329,8 @@ def test_subagent_info_extraction_and_customization_paths(tmp_path):
     assert _customization_kind(".cursor/rules/my-rule.md") == "rule"
     assert _customization_kind(r".cursor\hooks\guard.py") == "hook"
     assert _customization_kind(r"C:\repo\skills\my-skill\SKILL.md") == "skill"
+    assert _customization_kind(r"C:\repo\.agents\skills\my-skill.md") == "skill"
+    assert _customization_kind(r"C:\repo\.agents\skills\AGENTS.md") == "agent_doc"
     session_id = "0a7d3243-61b6-4b3a-8fc5-43c73e2db583"
     state = create_synthetic_state_db(tmp_path / "state.vscdb", session_id=session_id, bubble_count=2)
     tracking = create_synthetic_tracking_db(tmp_path / "tracking.db", session_id=session_id)
