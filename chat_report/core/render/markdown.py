@@ -60,7 +60,7 @@ def render_single_session_md(report: dict[str, Any]) -> str:
         f"- Title: {_text(session['title'])}",
         f"- Session ID: `{session['session_id']}`",
         f"- Request ID(s): {', '.join(f'`{item}`' for item in request_ids) if request_ids else 'None'}",
-        f"- Model: {_text(session['model_name'])} (maxMode={session['max_mode']}, reasoning_effort={_text(session['reasoning_effort'], 'none')})",
+        f"- Model: {_text(session['model_name'])} (maxMode={session['max_mode']}, reasoning_effort={_text(session['reasoning_effort'], 'unknown')})",
         f"- Duration: {_text(session['duration_ms'], 'unknown')} ms",
         f"- Status: {_text(session['status'])}",
         f"- Lines: +{session['total_lines_added']} / -{session['total_lines_removed']}",

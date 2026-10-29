@@ -1,18 +1,23 @@
+import base64
 import json
 from pathlib import Path
 import sqlite3
 
 import pytest
 
-from chat_report.adapters.cursor.adapter import CursorAdapter, _customization_kind
+from chat_report.adapters.cursor.adapter import CursorAdapter, _customization_kind, _reasoning_effort
 from chat_report.adapters.cursor import adapter as adapter_module
 from chat_report.adapters.cursor.store import (
     _sqlite_ro_uri,
     bubble_timestamps,
     extract_thinking,
     extract_token_breakdown,
+    extract_token_counts,
     fetch_attribution,
+    fetch_conversation_blobs,
     fetch_offloaded_content,
+    has_non_narration_thinking_in_bubble,
+    is_narration_block,
     open_ro,
     order_bubbles,
 )
@@ -270,12 +275,13 @@ def test_json_string_thinking_deduplication_and_timestamps():
         "thinking": '{"text": "unwrapped thought"}',
         "allThinkingBlocks": [{"text": "unwrapped thought"}, '{"text": "second thought"}'],
         "createdAt": "2026-01-01T00:00:01",
-        "thinkingDurationMs": 42.9,
+        "thinkingDurationMs": 142.9,
     }
     blocks = extract_thinking("b-1", bubble)
     assert [b.text for b in blocks] == ["unwrapped thought", "second thought"]
-    assert blocks[0].duration_ms == 42
+    assert blocks[0].duration_ms == 142
     assert blocks[0].started_at_ms == 1767225601000
+    assert blocks[0].completed_at_ms == 1767225601142
     assert bubble_timestamps({"createdAtMs": 1234.8}) == (1234, 1234)
 
 
@@ -456,6 +462,293 @@ def test_resumed_subagent_uses_latest_dispatch_status_and_preserves_type(tmp_pat
     assert len(session.subagents) == 1
     assert session.subagents[0].status == "completed"
     assert session.subagents[0].subagent_type == "general-purpose"
+
+
+def test_in_flight_session_and_child_subagent_and_attribution_window(tmp_path):
+    session_id = "0a7d3243-61b6-4b3a-8fc5-43c73e2db583"
+    state = create_synthetic_state_db(tmp_path / "state.vscdb", session_id=session_id, bubble_count=4)
+    tracking = create_synthetic_tracking_db(tmp_path / "tracking.db", session_id=session_id)
+    con = sqlite3.connect(state)
+    parent = json.loads(con.execute("SELECT value FROM cursorDiskKV WHERE key = ?", (f"composerData:{session_id}",)).fetchone()[0])
+    parent["isContinuationInProgress"] = True
+    parent["subagentComposerIds"] = ["child-in-flight"]
+    con.execute("UPDATE cursorDiskKV SET value = ? WHERE key = ?", (json.dumps(parent), f"composerData:{session_id}"))
+    child_data = {
+        "name": "Active Subagent",
+        "createdAt": 1000,
+        "lastUpdatedAt": 1200,
+        "status": "running",
+        "isSubagent": True,
+        "parentComposerId": session_id,
+    }
+    con.execute("INSERT INTO cursorDiskKV VALUES (?, ?)", ("composerData:child-in-flight", json.dumps(child_data)))
+    con.execute(
+        "INSERT INTO cursorDiskKV VALUES (?, ?)",
+        (
+            "bubbleId:child-in-flight:user",
+            json.dumps({
+                "type": 1,
+                "text": "run",
+                "startedAtMs": 1000,
+                "completedAtMs": 1100,
+                "tokenCount": {"inputTokens": 5, "outputTokens": 10},
+                "toolFormerData": {"name": "read_file_v2", "status": "loading", "params": {"targetFile": "a.py"}},
+            }),
+        ),
+    )
+    con.execute("INSERT INTO cursorDiskKV VALUES (?, ?)", ("composerConvHeaders:child-in-flight:000000", json.dumps([{"bubbleId": "user", "type": 1}])))
+    con.commit()
+    con.close()
+
+    session = CursorAdapter().extract_session(session_id, ExtractOptions(state_db=state, tracking_db=tracking))
+    assert session.in_flight is True
+    assert session.status is None
+    assert session.ended_at_ms is None
+    assert session.duration_ms is None
+    assert isinstance(session.captured_at_ms, int)
+    assert session.turns[0].input_tokens == 4
+    assert session.turns[0].output_tokens == 6
+    assert session.turns[-1].input_tokens is None
+    assert session.turns[-1].output_tokens is None
+    assert any(w["code"] == "cursor-session-in-flight" for w in session.warnings)
+    assert len(session.subagents) == 1
+    assert session.subagents[0].in_flight is True
+    assert session.subagents[0].status is None
+    assert session.subagents[0].duration_ms is None
+
+    # Now verify completed session does not extend attribution window to captured_at_ms, while in_flight does
+    track_con = sqlite3.connect(tracking)
+    late_commit_time = session.captured_at_ms - 1000
+    track_con.execute(
+        "INSERT INTO scored_commits VALUES (?, ?, ?, ?, ?, ?)",
+        ("def456", "In-flight commit", 5, 5, 0, late_commit_time),
+    )
+    track_con.commit()
+    track_con.close()
+
+    session_live = CursorAdapter().extract_session(session_id, ExtractOptions(state_db=state, tracking_db=tracking))
+    assert any(c["commitHash"] == "def456" for c in session_live.attribution.scored_commits)
+
+    con = sqlite3.connect(state)
+    parent["isContinuationInProgress"] = False
+    con.execute("UPDATE cursorDiskKV SET value = ? WHERE key = ?", (json.dumps(parent), f"composerData:{session_id}"))
+    con.commit()
+    con.close()
+
+    session_done = CursorAdapter().extract_session(session_id, ExtractOptions(state_db=state, tracking_db=tracking))
+    assert session_done.in_flight is False
+    assert session_done.duration_ms == 350
+    assert not any(c["commitHash"] == "def456" for c in session_done.attribution.scored_commits)
+
+
+def test_event_clock_ahead_of_capture_warning(tmp_path):
+    session_id = "0a7d3243-61b6-4b3a-8fc5-43c73e2db583"
+    state = create_synthetic_state_db(tmp_path / "state.vscdb", session_id=session_id, bubble_count=2)
+    tracking = create_synthetic_tracking_db(tmp_path / "tracking.db", session_id=session_id)
+    con = sqlite3.connect(state)
+    key = f"bubbleId:{session_id}:bubble-001"
+    bubble = json.loads(con.execute("SELECT value FROM cursorDiskKV WHERE key = ?", (key,)).fetchone()[0])
+    bubble["completedAtMs"] = 9999999999999
+    con.execute("UPDATE cursorDiskKV SET value = ? WHERE key = ?", (json.dumps(bubble), key))
+    con.commit()
+    con.close()
+
+    session = CursorAdapter().extract_session(session_id, ExtractOptions(state_db=state, tracking_db=tracking))
+    assert any(w["code"] == "cursor-event-clock-ahead-of-capture" for w in session.warnings)
+
+
+def test_conversation_blobs_narration_signatures_and_thinking_duration(tmp_path):
+    session_id = "0a7d3243-61b6-4b3a-8fc5-43c73e2db583"
+    state = create_synthetic_state_db(tmp_path / "state.vscdb", session_id=session_id, bubble_count=2)
+    tracking = create_synthetic_tracking_db(tmp_path / "tracking.db", session_id=session_id)
+
+    thinking_sig = base64.b64encode(b"\x08\x04\x12\x12\x0a\x10\x08\x13\x18\x02\x38\x01\x42\x08thinking").decode("ascii")
+    narration_sig = base64.b64encode(b"\x08\x04\x12\x13\x0a\x11\x08\x13\x18\x02\x38\x01\x42\x09narration").decode("ascii")
+    assert thinking_sig == "CAQSEgoQCBMYAjgBQgh0aGlua2luZw=="
+    assert narration_sig == "CAQSEwoRCBMYAjgBQgluYXJyYXRpb24="
+
+    # Explicitly thinking-signed block with 1..49 ms duration preserves duration_ms and completed_at_ms
+    short_signed_bubble = {
+        "thinking": {"text": "fast genuine thought", "signature": thinking_sig},
+        "startedAtMs": 5000,
+        "thinkingDurationMs": 25,
+    }
+    short_blocks = extract_thinking("b-short", short_signed_bubble)
+    assert len(short_blocks) == 1
+    assert short_blocks[0].duration_ms == 25
+    assert short_blocks[0].completed_at_ms == 5025
+
+    # Untimed genuine thinking block (thinkingDurationMs=None, completedAtMs=None)
+    untimed_bubble = {"thinking": {"text": "deep untimed thought"}}
+    assert has_non_narration_thinking_in_bubble(untimed_bubble, narration_texts=set()) is True
+    assert _reasoning_effort({"modelConfig": "invalid-not-a-dict"}, has_non_narration_thinking=True) == "enabled"
+    assert _reasoning_effort({"modelConfig": {"selectedModels": [{"parameters": [{"id": "effort", "value": "high"}]}]}}) == "high"
+    assert _reasoning_effort({"modelConfig": {"modelName": "claude-opus-4-7-thinking-high"}}) == "high"
+    assert _reasoning_effort({"modelConfig": {"modelName": "claude-opus-5-5[effort=max]"}}) == "max"
+    assert _reasoning_effort({"modelConfig": {}}, has_non_narration_thinking=False) is None
+
+    # Build conversationState protobuf framing with 5 blobs:
+    # 1: system prompt with <always_applied_workspace_rule> and <agent_requestable_workspace_rule>
+    # 2: assistant with narration signature ("narration only text") and shared text ("shared text")
+    # 3: assistant with thinking signature ("shared text") and malformed signature
+    # 4 & 5: duplicate toolCallId blobs merging result_text and file_size
+    h1 = "11" * 32
+    h2 = "22" * 32
+    h3 = "33" * 32
+    h4 = "44" * 32
+    h5 = "55" * 32
+    raw_proto = b"".join(b"\x0a\x22\x0a\x20" + bytes.fromhex(h) for h in (h1, h2, h3, h4, h5))
+    conv_state = "~" + base64.b64encode(raw_proto).decode("ascii")
+
+    con = sqlite3.connect(state)
+    composer = json.loads(con.execute("SELECT value FROM cursorDiskKV WHERE key = ?", (f"composerData:{session_id}",)).fetchone()[0])
+    composer["conversationState"] = conv_state
+    composer["context"] = {"cursorRules": [{"path": ".cursor/rules/session-rule.mdc"}]}
+    con.execute("UPDATE cursorDiskKV SET value = ? WHERE key = ?", (json.dumps(composer), f"composerData:{session_id}"))
+
+    blob1 = {
+        "role": "system",
+        "content": (
+            '<always_applied_workspace_rule name="d:/repo/AGENTS.md">rules</always_applied_workspace_rule>\n'
+            '<agent_requestable_workspace_rule fullPath="d:/repo/.cursor/rules/ignored.mdc">skip</agent_requestable_workspace_rule>'
+        ),
+    }
+    blob2 = {
+        "role": "assistant",
+        "providerOptions": {
+            "cursor": {
+                "anthropicNativeContent": json.dumps([
+                    {"type": "thinking", "thinking": "narration only text", "signature": narration_sig},
+                    {"type": "thinking", "thinking": "shared text", "signature": narration_sig},
+                ])
+            }
+        },
+    }
+    blob3 = {
+        "role": "assistant",
+        "providerOptions": {
+            "cursor": {
+                "anthropicNativeContent": [
+                    {"type": "thinking", "thinking": "shared text", "signature": thinking_sig},
+                    {"type": "thinking", "thinking": "bad sig text", "signature": "%%%not-base64%%%"},
+                ]
+            }
+        },
+    }
+    blob4 = {
+        "role": "tool",
+        "id": "tool-1",
+        "content": [{"toolCallId": "tool-1", "result": "recovered tool text"}],
+    }
+    blob5 = {
+        "role": "tool",
+        "id": "tool-1",
+        "providerOptions": {
+            "cursor": {
+                "highLevelToolCallResult": {
+                    "output": {"success": {"fileSize": 120000, "totalLines": 3000, "readRange": {"startLine": 1, "endLine": 50}}}
+                }
+            }
+        },
+    }
+    for h, b in ((h1, blob1), (h2, blob2), (h3, blob3), (h4, blob4), (h5, blob5)):
+        con.execute("INSERT INTO cursorDiskKV VALUES (?, ?)", (f"agentKv:blob:{h}", json.dumps(b)))
+
+    # Set bubble-001 to have narration-only thinking with 200ms duration, assistant text quoting <always_applied_workspace_rule>, and read_file_v2 without inline content
+    assistant_key = f"bubbleId:{session_id}:bubble-001"
+    assistant = json.loads(con.execute("SELECT value FROM cursorDiskKV WHERE key = ?", (assistant_key,)).fetchone()[0])
+    assistant["text"] = 'Assistant prose discussing <always_applied_workspace_rule name="quoted-in-assistant.mdc">.'
+    assistant["thinking"] = {"text": "narration only text"}
+    assistant["thinkingDurationMs"] = 200
+    assistant["tokenCount"] = {"inputTokens": 0, "outputTokens": 0}
+    assistant["toolFormerData"] = {
+        "name": "read_file_v2",
+        "toolCallId": "tool-1",
+        "modelCallId": "model-1",
+        "status": "completed",
+        "params": {"targetFile": "src/example.py"},
+        "result": {"totalLinesInFile": 3000},
+    }
+    con.execute("UPDATE cursorDiskKV SET value = ? WHERE key = ?", (json.dumps(assistant), assistant_key))
+    # Also set bubble-000 tokenCount to 0/0 and include an <always_applied_workspace_rule> in type == 1 user text
+    user_key = f"bubbleId:{session_id}:bubble-000"
+    user = json.loads(con.execute("SELECT value FROM cursorDiskKV WHERE key = ?", (user_key,)).fetchone()[0])
+    user["text"] = 'User prompt with <always_applied_workspace_rule name="user-bubble-rule.mdc">rule</always_applied_workspace_rule>'
+    user["tokenCount"] = {"inputTokens": 0, "outputTokens": 0}
+    con.execute("UPDATE cursorDiskKV SET value = ? WHERE key = ?", (json.dumps(user), user_key))
+    con.commit()
+
+    ro_con = open_ro(state)
+    try:
+        blobs = fetch_conversation_blobs(ro_con, composer)
+        assert blobs.narration_texts == {"narration only text"}
+        assert "shared text" not in blobs.narration_texts
+        assert blobs.tool_results["tool-1"]["result_text"] == "recovered tool text"
+        assert blobs.tool_results["tool-1"]["file_size"] == 120000
+        assert fetch_conversation_blobs(ro_con, {"conversationState": "~not_valid_base64_!!!"}) == fetch_conversation_blobs(ro_con, {})
+    finally:
+        ro_con.close()
+    con.close()
+
+    # Shared text in a genuine multi-second block keeps its duration
+    shared_blocks = extract_thinking("b-shared", {"thinking": {"text": "shared text"}, "startedAtMs": 1000, "thinkingDurationMs": 2500}, narration_texts=blobs.narration_texts)
+    assert shared_blocks[0].duration_ms == 2500
+    assert shared_blocks[0].completed_at_ms == 3500
+
+    # End-to-end extraction: narration-only session does not set reasoning_effort="enabled", zeroes out narration duration/completed_at_ms, recovers tool output, and enumerates rules
+    session = CursorAdapter().extract_session(session_id, ExtractOptions(state_db=state, tracking_db=tracking))
+    assert session.reasoning_effort is None
+    t_block = session.turns[0].thinking_blocks[0]
+    assert t_block.text == "narration only text"
+    assert t_block.duration_ms is None
+    assert t_block.completed_at_ms is None
+    assert session.turns[0].input_tokens is None
+    assert session.turns[0].output_tokens is None
+    call = session.turns[0].tool_calls[0]
+    assert call.output_summary == "recovered tool text"
+    assert call.output_char_len == len("recovered tool text")
+    assert call.input_params["_file_size"] == 120000
+    cust_paths = {c.path for c in session.customizations}
+    assert "d:/repo/AGENTS.md" in cust_paths
+    assert "user-bubble-rule.mdc" in cust_paths
+    assert ".cursor/rules/session-rule.mdc" in cust_paths
+    assert "d:/repo/.cursor/rules/ignored.mdc" not in cust_paths
+    assert "quoted-in-assistant.mdc" not in cust_paths
+
+
+def test_token_counts_and_top_context_nodes_ranking():
+    assert extract_token_counts({"tokenCount": {"inputTokens": 0, "outputTokens": 0}}) == (None, None)
+    assert extract_token_counts({"tokenCount": {"inputTokens": 0, "outputTokens": 12}}) == (0, 12)
+    assert extract_token_counts({"tokenCount": 0}) == (None, None)
+    assert extract_token_counts({"tokenCount": -5}) == (None, None)
+
+    tree = {
+        "nodes": [
+            {
+                "id": "container",
+                "estimatedTokens": 99999,
+                "children": [
+                    {"id": "b-tie", "estimatedTokens": 500.0, "characterCount": 2000, "tokens": True},
+                    {"id": "a-tie", "estimatedTokens": 500, "characterCount": 2000, "chars": "bad"},
+                    {"id": "char-winner", "estimatedTokens": 500, "characterCount": 3000},
+                    {"id": "no-tokens", "characterCount": 100},
+                ],
+            },
+            *[
+                {"id": f"node-{i:02d}", "tokens": 1000 + i * 10}
+                for i in range(15)
+            ],
+        ]
+    }
+    tb = extract_token_breakdown({"promptContextUsageTree": tree})
+    assert len(tb.top_context_nodes) == 15
+    assert tb.top_context_nodes[0]["id"] == "node-14"
+    # Verify boolean and invalid fields were stripped on normalized nodes
+    tie_Tree = [{"id": "b", "tokens": 10, "chars": 20}, {"id": "a", "tokens": 10, "chars": 20, "estimatedTokens": False}, {"id": "c", "tokens": 10, "chars": 50}]
+    tb_tie = extract_token_breakdown({"promptContextUsageTree": tie_Tree})
+    assert [n["id"] for n in tb_tie.top_context_nodes] == ["c", "a", "b"]
+    assert "estimatedTokens" not in tb_tie.top_context_nodes[1]
+
 
 
 

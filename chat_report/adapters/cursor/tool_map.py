@@ -32,6 +32,154 @@ KNOWN_MCP_SERVER_PREFIXES: tuple[str, ...] = (
     "plugin-atlassian-atlassian", "plugin-postman-postman", "plugin-nexus-nexus",
     "plugin-context7-context7", "user-lore", "cursor-origin",
 )
+_POWERSHELL_CMDLETS: frozenset[str] = frozenset({
+    "get-command", "format-list", "format-table", "select-object", "where-object",
+    "foreach-object", "sort-object", "measure-object", "out-string", "out-null",
+    "get-childitem", "get-content", "get-item", "test-path", "write-output",
+    "write-host", "select-string",
+})
+
+
+def _int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    return None
+
+
+def _exe_basename(raw_token: str) -> str:
+    cleaned = raw_token.strip().strip("\"'")
+    name = cleaned.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return name[:-4] if name.endswith(".exe") else name
+
+
+def _split_shell_tokens(segment: str) -> list[str]:
+    return [tok.strip("\"'") for tok in re.findall(r'"[^"]*"|\'[^\']*\'|\S+', segment)]
+
+
+def _split_top_level_segments(command: str) -> list[str]:
+    segments: list[str] = []
+    buf: list[str] = []
+    in_single = False
+    in_double = False
+    i = 0
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            buf.append(ch)
+            i += 1
+            continue
+        if not in_single and not in_double:
+            if command.startswith("&&", i) or command.startswith("||", i):
+                seg = "".join(buf).strip()
+                if seg:
+                    segments.append(seg)
+                buf.clear()
+                i += 2
+                continue
+            if ch in (";", "|"):
+                seg = "".join(buf).strip()
+                if seg:
+                    segments.append(seg)
+                buf.clear()
+                i += 1
+                continue
+        buf.append(ch)
+        i += 1
+    tail = "".join(buf).strip()
+    if tail:
+        segments.append(tail)
+    return segments
+
+
+def _native_shell_commands(params: dict[str, Any]) -> list[tuple[str, list[str]]]:
+    parsing = params.get("parsingResult")
+    if isinstance(parsing, dict):
+        exec_cmds = parsing.get("executableCommands")
+        if isinstance(exec_cmds, list):
+            native = [
+                (
+                    _exe_basename(str(entry["name"])),
+                    [
+                        str(a.get("value") or "").strip("\"'")
+                        for a in (entry.get("args") or [])
+                        if isinstance(a, dict)
+                    ],
+                )
+                for entry in exec_cmds
+                if isinstance(entry, dict)
+                and _exe_basename(str(entry.get("name") or ""))
+                and _exe_basename(str(entry.get("name") or "")) not in _POWERSHELL_CMDLETS
+            ]
+            if native:
+                return native
+    matches: list[tuple[str, list[str]]] = []
+    for seg in _split_top_level_segments(str(params.get("command") or "")):
+        tokens = _split_shell_tokens(seg)
+        while tokens and tokens[0] in ("&", "."):
+            tokens = tokens[1:]
+        if not tokens:
+            continue
+        if tokens[0].startswith("$"):
+            continue
+        base = _exe_basename(tokens[0])
+        if not base or base in _POWERSHELL_CMDLETS:
+            continue
+        matches.append((base, tokens[1:]))
+    return matches
+
+
+def resolve_governing_shell_command(params: dict[str, Any]) -> tuple[str, list[str]]:
+    native = _native_shell_commands(params)
+    return native[-1] if native else ("", [])
+
+
+def is_benign_nonzero_shell_exit(
+    params: dict[str, Any],
+    unwrapped_result: Any,
+    *,
+    raw_status: str = "",
+    error_value: Any = None,
+) -> bool:
+    if (
+        raw_status in ("error", "failed")
+        or bool(error_value)
+        or not isinstance(unwrapped_result, dict)
+        or unwrapped_result.get("rejected") is True
+    ):
+        return False
+    exit_code = unwrapped_result.get("exitCode")
+    if isinstance(exit_code, bool) or not isinstance(exit_code, int) or exit_code == 0:
+        return False
+    if any(unwrapped_result.get(key) for key in ("error", "isError", "Error")):
+        return False
+    native_cmds = _native_shell_commands(params)
+    if len(native_cmds) != 1:
+        return False
+    base, args = native_cmds[0]
+    lower_args = [a.lower() for a in args]
+    out_str = str(unwrapped_result.get("output") or "")
+    if base in ("fc", "diff", "cmp") and exit_code == 1 and not re.search(r"cannot open|no such file|cannot find", out_str, re.I):
+        return True
+    if base in ("rg", "ripgrep", "grep", "egrep", "fgrep", "findstr") and exit_code == 1 and not re.search(r"regex parse error|syntax error|no such file|cannot find", out_str, re.I):
+        return True
+    if base in ("pip", "pip3") and len(lower_args) >= 1 and lower_args[0] == "show" and exit_code == 1:
+        return True
+    if base in ("where", "which", "command") and exit_code == 1:
+        return True
+    if base == "git" and "diff" in lower_args and any(f in lower_args for f in ("--quiet", "--exit-code")) and exit_code == 1:
+        return True
+    if base == "robocopy" and 0 < exit_code < 8:
+        return True
+    return False
 
 
 def _json(value: Any) -> Any:
@@ -199,6 +347,7 @@ def map_tool_call(
     started_at_ms: int | None = None,
     completed_at_ms: int | None = None,
     denial_markers: tuple[str, ...] = (),
+    tool_blob: dict[str, Any] | None = None,
 ) -> ToolCallIR:
     """Map one Cursor toolFormerData object to a canonical tool-call record."""
     tfd = tool_former_data if isinstance(tool_former_data, dict) else {}
@@ -268,10 +417,69 @@ def map_tool_call(
         paths_val = params.get("paths")
         if isinstance(paths_val, list) and paths_val and isinstance(paths_val[0], str) and paths_val[0]:
             target = paths_val[0]
+    additional = _as_dict(tfd.get("additionalData"))
+    if "totalMatches" in additional or "totalFiles" in additional:
+        params["_total_matches"] = _int(additional.get("totalMatches"))
+        params["_total_files"] = _int(additional.get("totalFiles"))
     result_text = _error_text(unwrapped_result)
+    if kind is CanonicalToolKind.SEARCH_GREP and unwrapped_result is None:
+        if tool_blob and tool_blob.get("result_text"):
+            result_text = str(tool_blob["result_text"])
+        elif "totalMatches" in additional or "topFiles" in additional:
+            top_files = additional.get("topFiles") if isinstance(additional.get("topFiles"), list) else []
+            total_matches = _int(additional.get("totalMatches"))
+            if total_matches is None and top_files:
+                total_matches = sum(_int(f.get("matchCount")) or 0 for f in top_files if isinstance(f, dict))
+            if total_matches is not None and total_matches > 0:
+                result_text = json.dumps(
+                    {
+                        "totalFiles": additional.get("totalFiles"),
+                        "totalMatches": total_matches,
+                        "topFiles": top_files,
+                    },
+                    sort_keys=True,
+                )
+            else:
+                result_text = ""
+    if (
+        kind is CanonicalToolKind.FILE_READ
+        and isinstance(unwrapped_result, dict)
+        and "contents" not in unwrapped_result
+        and "content" not in unwrapped_result
+        and tool_blob is not None
+    ):
+        blob_text = str(tool_blob.get("result_text") or "")
+        file_size = tool_blob.get("file_size")
+        total_lines = tool_blob.get("total_lines") or unwrapped_result.get("totalLinesInFile")
+        if isinstance(file_size, int) and not isinstance(file_size, bool):
+            params["_file_size"] = file_size
+        if isinstance(tool_blob.get("read_range"), dict):
+            params["_read_range"] = tool_blob["read_range"]
+        if blob_text:
+            result_text = blob_text
+        elif isinstance(file_size, int) and not isinstance(file_size, bool) and file_size > 0:
+            result_text = json.dumps(
+                {
+                    "fileSize": file_size,
+                    "readRange": tool_blob.get("read_range"),
+                    "totalLinesInFile": total_lines,
+                },
+                sort_keys=True,
+            )
     raw_status = str(tfd.get("status") or "").lower()
     error_value = tfd.get("error")
     has_nonzero_exit = isinstance(unwrapped_result, dict) and unwrapped_result.get("exitCode") not in (None, 0)
+    if kind is CanonicalToolKind.SHELL_EXEC:
+        base_exe, _ = resolve_governing_shell_command(params)
+        if base_exe:
+            params["_governing_exe"] = base_exe
+        if has_nonzero_exit:
+            exit_code_int = _int(unwrapped_result.get("exitCode"))
+            if exit_code_int is not None and exit_code_int != 0:
+                params["_exit_code"] = exit_code_int
+            if is_benign_nonzero_shell_exit(params, unwrapped_result, raw_status=raw_status, error_value=error_value):
+                has_nonzero_exit = False
+                params["_benign_nonzero_exit"] = True
     has_result_error = isinstance(unwrapped_result, dict) and any(
         unwrapped_result.get(key) for key in ("error", "isError", "Error")
     )

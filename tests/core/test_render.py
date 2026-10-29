@@ -185,7 +185,7 @@ def test_markdown_sections_and_digest_bounds_under_adversarial_input(tmp_path: P
         "0a7d3243-61b6-4b3a-8fc5-43c73e2db583",
         "request-0",
         "test-model (maxMode=True, reasoning_effort=medium)",
-        "Duration: 2000 ms",
+        "Duration: 1950 ms",
         "Status: completed",
         "+3 / -1",
         "Orphan Bubbles Filtered: 2",
@@ -210,7 +210,7 @@ def test_markdown_sections_and_digest_bounds_under_adversarial_input(tmp_path: P
         "| generalPurpose | `child-session` | 1 | 2 | 0 | skills/demo/SKILL.md | 25 |",
         "### Turn 1",
         "User Prompt Preview: User 0",
-        "Thinking (25 ms): reasoning",
+        "Thinking (250 ms): reasoning",
         "Tool: `edit_file_v2` [completed] 50 ms",
         "Assistant Output Summary: Assistant 1",
         "Composer code hashes: 1",
@@ -442,4 +442,148 @@ def test_markdown_table_escaping_context_summary_and_tool_target_detail(tmp_path
     assert r"| type\|pipe line | `sub\|1 id` | 1 | 1 | 0 | skills/a\|b/SKILL.md | 50 |" in markdown
     assert "- Tool: `edit_file_v2` [completed] 50 ms -> `src/target.py`" in markdown
     assert "- Tool: `read_file_v2` [completed] 50 ms -> `pytest -q`" in markdown
+    report["session"]["reasoning_effort"] = None
+    assert "reasoning_effort=unknown" in render_single_session_md(report)
+
+
+def test_validator_rejects_in_flight_captured_at_ms_and_top_context_nodes_violations(tmp_path: Path) -> None:
+    report = _report(tmp_path)
+
+    # (a) non-boolean session.in_flight, subagents[].in_flight, or sessions[].in_flight
+    bad_in_flight = deepcopy(report)
+    bad_in_flight["session"]["in_flight"] = "yes"
+    with pytest.raises(ValueError, match="session.in_flight must be bool"):
+        assert_v2_report_conforms(bad_in_flight)
+
+    bad_sub_in_flight = deepcopy(report)
+    bad_sub_in_flight["session"]["subagents"] = [{
+        "session_id": "c1",
+        "parent_turn_index": 1,
+        "subagent_type": "explore",
+        "name": "child",
+        "model_name": "m",
+        "status": "completed",
+        "duration_ms": 10,
+        "turn_count": 1,
+        "tool_call_count": 1,
+        "error_count": 0,
+        "denial_count": 0,
+        "skills_read": [],
+        "rules_read": [],
+        "in_flight": 1,
+    }]
+    with pytest.raises(ValueError, match="subagent.in_flight must be bool"):
+        assert_v2_report_conforms(bad_sub_in_flight)
+
+    # (b) non-null status, ended_at_ms, duration_ms, or aggregates.timing.total_session_ms when session.in_flight is True
+    for field_name in ("status", "ended_at_ms", "duration_ms"):
+        bad_live = deepcopy(report)
+        bad_live["session"]["in_flight"] = True
+        bad_live["session"]["status"] = None
+        bad_live["session"]["ended_at_ms"] = None
+        bad_live["session"]["duration_ms"] = None
+        bad_live["aggregates"]["timing"]["total_session_ms"] = None
+        bad_live["session"][field_name] = "completed" if field_name == "status" else 100
+        with pytest.raises(ValueError, match=f"in-flight session.{field_name} must be null"):
+            assert_v2_report_conforms(bad_live)
+
+    bad_live_agg_timing = deepcopy(report)
+    bad_live_agg_timing["session"]["in_flight"] = True
+    bad_live_agg_timing["session"]["status"] = None
+    bad_live_agg_timing["session"]["ended_at_ms"] = None
+    bad_live_agg_timing["session"]["duration_ms"] = None
+    bad_live_agg_timing["aggregates"]["timing"]["total_session_ms"] = 100
+    with pytest.raises(ValueError, match="timing.total_session_ms mismatch"):
+        assert_v2_report_conforms(bad_live_agg_timing)
+
+    # non-null status/duration_ms on an in-flight subagent
+    for sub_field, sub_val in (("status", "completed"), ("duration_ms", 10)):
+        bad_live_sub = deepcopy(bad_sub_in_flight)
+        bad_live_sub["session"]["subagents"][0]["in_flight"] = True
+        bad_live_sub["session"]["subagents"][0]["status"] = None
+        bad_live_sub["session"]["subagents"][0]["duration_ms"] = None
+        bad_live_sub["session"]["subagents"][0][sub_field] = sub_val
+        with pytest.raises(ValueError, match=f"in-flight subagent.{sub_field} must be null"):
+            assert_v2_report_conforms(bad_live_sub)
+
+    # (c) non-int or boolean captured_at_ms on session
+    for bad_cap in (True, "12345"):
+        bad_cap_rep = deepcopy(report)
+        bad_cap_rep["session"]["captured_at_ms"] = bad_cap
+        with pytest.raises(ValueError, match="session.captured_at_ms must be an int"):
+            assert_v2_report_conforms(bad_cap_rep)
+
+    # Aggregate session summary checks: in_flight, captured_at_ms, and timing.total_session_ms != duration_ms
+    session = classify_session(
+        CursorAdapter().extract_session(
+            report["session"]["session_id"],
+            ExtractOptions(state_db=tmp_path / "state.vscdb", tracking_db=tmp_path / "tracking.db"),
+        ),
+        tmp_path,
+    )
+    aggregate = build_aggregate_report([session, session])
+    bad_agg_bool = deepcopy(aggregate)
+    bad_agg_bool["sessions"][0]["in_flight"] = "no"
+    with pytest.raises(ValueError, match="aggregate session in_flight must be bool"):
+        assert_v2_report_conforms(bad_agg_bool)
+
+    for agg_field, agg_val in (("status", "completed"), ("duration_ms", 100)):
+        bad_agg_live = deepcopy(aggregate)
+        bad_agg_live["sessions"][0]["in_flight"] = True
+        bad_agg_live["sessions"][0]["status"] = None
+        bad_agg_live["sessions"][0]["duration_ms"] = None
+        bad_agg_live["sessions"][0]["aggregates"]["timing"]["total_session_ms"] = None
+        bad_agg_live["sessions"][0][agg_field] = agg_val
+        with pytest.raises(ValueError, match=f"in-flight aggregate session {agg_field} must be null"):
+            assert_v2_report_conforms(bad_agg_live)
+
+    bad_agg_timing = deepcopy(aggregate)
+    bad_agg_timing["sessions"][0]["aggregates"]["timing"]["total_session_ms"] = 999999
+    with pytest.raises(ValueError, match="aggregate session timing.total_session_ms mismatch"):
+        assert_v2_report_conforms(bad_agg_timing)
+
+    bad_agg_cap = deepcopy(aggregate)
+    bad_agg_cap["sessions"][0]["captured_at_ms"] = False
+    with pytest.raises(ValueError, match="aggregate session captured_at_ms must be an int"):
+        assert_v2_report_conforms(bad_agg_cap)
+
+    # (d) out-of-order top_context_nodes (by token count, character count tie-breaker, or id/label tie-breaker), > 15 nodes, or boolean token/char fields
+    bad_nodes_order = deepcopy(report)
+    bad_nodes_order["session"]["token_breakdown"]["top_context_nodes"] = [
+        {"id": "small", "tokens": 10},
+        {"id": "large", "tokens": 20},
+    ]
+    with pytest.raises(ValueError, match="top_context_nodes not sorted"):
+        assert_v2_report_conforms(bad_nodes_order)
+
+    bad_nodes_char_tie = deepcopy(report)
+    bad_nodes_char_tie["session"]["token_breakdown"]["top_context_nodes"] = [
+        {"id": "a", "tokens": 10, "characterCount": 50},
+        {"id": "b", "tokens": 10, "characterCount": 100},
+    ]
+    with pytest.raises(ValueError, match="top_context_nodes not sorted"):
+        assert_v2_report_conforms(bad_nodes_char_tie)
+
+    bad_nodes_id_tie = deepcopy(report)
+    bad_nodes_id_tie["session"]["token_breakdown"]["top_context_nodes"] = [
+        {"id": "z", "tokens": 10, "chars": 50},
+        {"id": "a", "tokens": 10, "chars": 50},
+    ]
+    with pytest.raises(ValueError, match="top_context_nodes not sorted"):
+        assert_v2_report_conforms(bad_nodes_id_tie)
+
+    bad_nodes_cap = deepcopy(report)
+    bad_nodes_cap["session"]["token_breakdown"]["top_context_nodes"] = [
+        {"id": f"n{i:02d}", "tokens": 100 - i} for i in range(16)
+    ]
+    with pytest.raises(ValueError, match="top_context_nodes invalid"):
+        assert_v2_report_conforms(bad_nodes_cap)
+
+    bad_nodes_bool = deepcopy(report)
+    bad_nodes_bool["session"]["token_breakdown"]["top_context_nodes"] = [
+        {"id": "a", "estimatedTokens": True}
+    ]
+    with pytest.raises(ValueError, match="top_context_nodes.estimatedTokens must be an int"):
+        assert_v2_report_conforms(bad_nodes_bool)
+
 

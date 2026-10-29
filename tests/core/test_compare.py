@@ -39,3 +39,24 @@ def test_reports_preserve_deduplicated_session_warnings() -> None:
     assert build_single_session_report(before)["warnings"] == [warning]
     assert build_diff_report(before, after)["warnings"] == [warning, {"code": "second", "message": "also kept"}]
     assert build_aggregate_report([before, after])["warnings"] == [warning, {"code": "second", "message": "also kept"}]
+
+
+def test_captured_at_ms_syncs_single_and_embedded_diff_generated_at_iso() -> None:
+    before, after = _session("before"), _session("after")
+    before.captured_at_ms = 1767225600000
+    after.captured_at_ms = 1767229200000
+    after.in_flight = True
+    after.status = None
+    after.duration_ms = None
+    after.ended_at_ms = None
+    single = build_single_session_report(before)
+    assert single["generated_at_iso"] == "2026-01-01T00:00:00+00:00"
+    diff = build_diff_report(before, after)
+    assert diff["before"]["generated_at_iso"] == "2026-01-01T00:00:00+00:00"
+    assert diff["after"]["generated_at_iso"] == "2026-01-01T01:00:00+00:00"
+    assert diff["generated_at_iso"] != diff["before"]["generated_at_iso"]
+    agg = build_aggregate_report([before, after])
+    assert agg["sessions"][0]["captured_at_ms"] == 1767225600000
+    assert agg["sessions"][0]["in_flight"] is False
+    assert agg["sessions"][1]["captured_at_ms"] == 1767229200000
+    assert agg["sessions"][1]["in_flight"] is True

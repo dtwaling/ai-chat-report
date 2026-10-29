@@ -77,6 +77,8 @@ def build_single_session_report(session: SessionIR, *, diagnostics: list[Diagnos
     session_data.pop("turns")
     session_data.pop("warnings")
     report = _envelope("single-session", [session])
+    if session.captured_at_ms is not None:
+        report["generated_at_iso"] = datetime.fromtimestamp(session.captured_at_ms / 1000.0, tz=timezone.utc).isoformat()
     report.update({
         "session": session_data,
         "aggregates": single["aggregates"],
@@ -97,6 +99,7 @@ def _session_summary(single: dict[str, Any]) -> dict[str, Any]:
         "title": session.title, "model_name": session.model_name, "status": session.status,
         "duration_ms": session.duration_ms, "total_lines_added": session.total_lines_added,
         "total_lines_removed": session.total_lines_removed,
+        "in_flight": session.in_flight, "captured_at_ms": session.captured_at_ms,
         "attribution": asdict(session.attribution) if session.attribution else None,
         "aggregates": single["aggregates"],
         "diagnostics": {"total_findings": single["diagnostics"]["total_findings"], "by_severity": single["diagnostics"]["by_severity"], "findings": [_finding_dict(x) for x in single["diagnostics"]["findings"]]},

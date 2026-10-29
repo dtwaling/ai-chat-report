@@ -1,6 +1,12 @@
 import pytest
 
-from chat_report.adapters.cursor.tool_map import map_tool_call, parse_mcp_raw_name, unwrap_mcp_payload
+from chat_report.adapters.cursor.tool_map import (
+    is_benign_nonzero_shell_exit,
+    map_tool_call,
+    parse_mcp_raw_name,
+    resolve_governing_shell_command,
+    unwrap_mcp_payload,
+)
 from chat_report.core.ir import CanonicalToolKind
 
 
@@ -202,4 +208,185 @@ def test_expanded_target_paths_tool_kinds_and_mcp_discovery_namespace():
     }, call_index=4, turn_index=1, bubble_id="b")
     assert disc_call.canonical_kind == CanonicalToolKind.MCP_DISCOVERY.value
     assert (disc_call.mcp_namespace, disc_call.mcp_tool_name) == ("plugin-eci-core-lore", "repo_grep")
+
+
+def test_search_grep_and_file_read_output_recovery():
+    # ripgrep_raw_search with tool_blob result_text
+    rg_blob = map_tool_call(
+        {
+            "name": "ripgrep_raw_search",
+            "status": "completed",
+            "params": {"pattern": "SessionIR"},
+            "result": None,
+            "additionalData": {"totalMatches": 12, "totalFiles": 3},
+        },
+        call_index=1,
+        turn_index=1,
+        bubble_id="b",
+        tool_blob={"result_text": "chat_report/core/ir.py:198:class SessionIR:"},
+    )
+    assert rg_blob.output_char_len == len("chat_report/core/ir.py:198:class SessionIR:")
+    assert rg_blob.input_params["_total_matches"] == 12
+    assert rg_blob.input_params["_total_files"] == 3
+
+    # ripgrep_raw_search fallback to additionalData when totalMatches > 0
+    rg_add = map_tool_call(
+        {
+            "name": "ripgrep_raw_search",
+            "status": "completed",
+            "params": {"pattern": "SessionIR"},
+            "result": None,
+            "additionalData": {"totalFiles": 1, "topFiles": [{"uri": "ir.py", "matchCount": 4}]},
+        },
+        call_index=2,
+        turn_index=1,
+        bubble_id="b",
+    )
+    assert rg_add.output_char_len > 0
+    assert '"totalMatches": 4' in rg_add.output_summary
+
+    # ripgrep_raw_search with 0 matches stays empty
+    rg_zero = map_tool_call(
+        {
+            "name": "ripgrep_raw_search",
+            "status": "completed",
+            "params": {"pattern": "NonExistentSymbol"},
+            "result": None,
+            "additionalData": {"totalMatches": 0, "totalFiles": 0, "topFiles": []},
+        },
+        call_index=3,
+        turn_index=1,
+        bubble_id="b",
+    )
+    assert rg_zero.output_char_len == 0
+    assert rg_zero.output_summary == ""
+
+    # read_file_v2 with metadata-only tool_blob does not fabricate >= 40000 H06 spike
+    rf_meta = map_tool_call(
+        {
+            "name": "read_file_v2",
+            "status": "completed",
+            "params": {"targetFile": "large.bin"},
+            "result": {"totalLinesInFile": 5000},
+        },
+        call_index=4,
+        turn_index=1,
+        bubble_id="b",
+        tool_blob={"result_text": "", "file_size": 150000, "total_lines": 5000, "read_range": {"startLine": 1, "endLine": 100}},
+    )
+    assert rf_meta.input_params["_file_size"] == 150000
+    assert rf_meta.input_params["_read_range"] == {"startLine": 1, "endLine": 100}
+    assert 0 < rf_meta.output_char_len < 200
+    assert '"fileSize": 150000' in rf_meta.output_summary
+
+
+def test_resolve_governing_shell_command_and_benign_nonzero_exits():
+    assert resolve_governing_shell_command({"command": '& "C:\\Program Files\\Git\\bin\\git.exe" diff --quiet'}) == ("git", ["diff", "--quiet"])
+    assert resolve_governing_shell_command({"command": "/usr/local/bin/rg 'a|b;c' src/ | Select-Object -First 5"}) == ("rg", ["a|b;c", "src/"])
+    assert resolve_governing_shell_command({"command": "cd /repo && pip3 show pytest || echo fallback"}) == ("echo", ["fallback"])
+    assert resolve_governing_shell_command({
+        "command": "Get-Command node | Format-List",
+        "parsingResult": {
+            "executableCommands": [
+                {"name": "fc.exe", "args": [{"value": "/b"}, {"value": "a.txt"}, {"value": "b.txt"}]},
+                {"name": "Out-String", "args": []},
+            ]
+        },
+    }) == ("fc", ["/b", "a.txt", "b.txt"])
+
+    for cmd, code in (
+        ("fc.exe a.txt b.txt", 1),
+        ("rg missing_pattern src/", 1),
+        ("pip show some-missing-pkg", 1),
+        ("where.exe nonexistent_bin", 1),
+        ('& "C:\\Program Files\\Git\\bin\\git.exe" diff --quiet', 1),
+        ("robocopy src dst", 3),
+    ):
+        call = map_tool_call(
+            {
+                "name": "run_terminal_command_v2",
+                "status": "completed",
+                "params": {"command": cmd},
+                "result": {"exitCode": code, "output": "Comparing files..."},
+            },
+            call_index=1,
+            turn_index=1,
+            bubble_id="b",
+        )
+        assert (call.status, call.is_error) == ("completed", False)
+        assert call.input_params["_exit_code"] == code
+        assert call.input_params["_benign_nonzero_exit"] is True
+
+    # Real errors with exit code 1 or >= 8 stay error
+    for cmd, code, out in (
+        ("fc.exe missing.txt b.txt", 1, "FC: cannot open MISSING.TXT - No such file or directory"),
+        ("rg '[unclosed' src/", 1, "regex parse error: unclosed character class"),
+        ("pytest -q", 1, "1 failed"),
+        ("robocopy src dst", 8, "ERROR"),
+    ):
+        call = map_tool_call(
+            {
+                "name": "run_terminal_command_v2",
+                "status": "completed",
+                "params": {"command": cmd},
+                "result": {"exitCode": code, "output": out},
+            },
+            call_index=1,
+            turn_index=1,
+            bubble_id="b",
+        )
+        assert (call.status, call.is_error) == ("error", True)
+        assert "_benign_nonzero_exit" not in call.input_params
+
+    # Non-integer exitCode (e.g. "SIGKILL") does not raise, sets status == "error", and does not set _exit_code
+    sigkill_call = map_tool_call(
+        {
+            "name": "run_terminal_command_v2",
+            "status": "completed",
+            "params": {"command": "pytest -q"},
+            "result": {"exitCode": "SIGKILL", "output": "Killed"},
+        },
+        call_index=1,
+        turn_index=1,
+        bubble_id="b",
+    )
+    assert (sigkill_call.status, sigkill_call.is_error) == ("error", True)
+    assert "_exit_code" not in sigkill_call.input_params
+    assert "_benign_nonzero_exit" not in sigkill_call.input_params
+
+    # Multiple native executables guard: >= 2 native executables is NOT reclassified as benign
+    multi_native = map_tool_call(
+        {
+            "name": "run_terminal_command_v2",
+            "status": "completed",
+            "params": {"command": "pytest -q && rg TODO"},
+            "result": {"exitCode": 1, "output": "1 failed"},
+        },
+        call_index=1,
+        turn_index=1,
+        bubble_id="b",
+    )
+    assert (multi_native.status, multi_native.is_error) == ("error", True)
+    assert multi_native.input_params["_governing_exe"] == "rg"
+    assert multi_native.input_params["_exit_code"] == 1
+    assert "_benign_nonzero_exit" not in multi_native.input_params
+
+    # Single native executable with PowerShell cmdlets IS reclassified as benign
+    single_native_with_cmdlets = map_tool_call(
+        {
+            "name": "run_terminal_command_v2",
+            "status": "completed",
+            "params": {"command": "Get-Command foo | Format-List; pip show bar | Select-Object -First 5"},
+            "result": {"exitCode": 1, "output": "WARNING: Package(s) not found: bar"},
+        },
+        call_index=1,
+        turn_index=1,
+        bubble_id="b",
+    )
+    assert (single_native_with_cmdlets.status, single_native_with_cmdlets.is_error) == ("completed", False)
+    assert single_native_with_cmdlets.input_params["_governing_exe"] == "pip"
+    assert single_native_with_cmdlets.input_params["_exit_code"] == 1
+    assert single_native_with_cmdlets.input_params["_benign_nonzero_exit"] is True
+
+
 

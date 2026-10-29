@@ -100,6 +100,8 @@ def classify_tool_call(tool_call: ToolCallIR) -> str:
         return "dynamic-tool-discovery"
     if kind == "mcp_call":
         return f"mcp-call:{tool_call.mcp_namespace or 'unknown'}"
+    if kind == "web_access":
+        return "web-access"
     return "agent-workflow"
 
 

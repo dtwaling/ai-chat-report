@@ -14,6 +14,80 @@ from chat_report.core.ir import CustomizationRefIR, DiagnosticFinding, HEURISTIC
 _SCHEMA_ERROR = re.compile(r"(schema|parameter|validation|required|unexpected|invalid argument)", re.I)
 _FRICTION = re.compile(r"conflicting instruction|contradicts|rule says .* but|skill says .* but|blocked by|cannot use .* because|workaround|failed again|keep failing|not allowed to use", re.I)
 _TEST_COMMAND = re.compile(r"\b(pytest|mypy|pyright|ruff|tsc|eslint|vitest|jest|(?:npm|pnpm|yarn)\s+test|cargo\s+(?:test|check|clippy)|go\s+(?:test|vet)|dotnet\s+(?:test|build)|(?:mvn|gradle)\s+test)", re.I)
+_POWERSHELL_CMDLETS: frozenset[str] = frozenset({
+    "get-command", "format-list", "format-table", "select-object", "where-object",
+    "foreach-object", "sort-object", "measure-object", "out-string", "out-null",
+    "get-childitem", "get-content", "get-item", "test-path", "write-output",
+    "write-host", "select-string",
+})
+
+
+def _exe_basename(raw_token: str) -> str:
+    cleaned = raw_token.strip().strip("\"'")
+    name = cleaned.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return name[:-4] if name.endswith(".exe") else name
+
+
+def _split_shell_tokens(segment: str) -> list[str]:
+    return [tok.strip("\"'") for tok in re.findall(r'"[^"]*"|\'[^\']*\'|\S+', segment)]
+
+
+def _split_top_level_segments(command: str) -> list[str]:
+    segments: list[str] = []
+    buf: list[str] = []
+    in_single = False
+    in_double = False
+    i = 0
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            buf.append(ch)
+            i += 1
+            continue
+        if not in_single and not in_double:
+            if command.startswith("&&", i) or command.startswith("||", i):
+                seg = "".join(buf).strip()
+                if seg:
+                    segments.append(seg)
+                buf.clear()
+                i += 2
+                continue
+            if ch in (";", "|"):
+                seg = "".join(buf).strip()
+                if seg:
+                    segments.append(seg)
+                buf.clear()
+                i += 1
+                continue
+        buf.append(ch)
+        i += 1
+    tail = "".join(buf).strip()
+    if tail:
+        segments.append(tail)
+    return segments
+
+
+def _shell_fail_exe(call: ToolCallIR) -> str:
+    gov_exe = str(call.input_params.get("_governing_exe") or "").strip().lower()
+    if gov_exe:
+        return gov_exe
+    for seg in _split_top_level_segments(str(call.input_params.get("command") or "")):
+        tokens = _split_shell_tokens(seg)
+        while tokens and tokens[0] in ("&", "."):
+            tokens = tokens[1:]
+        if not tokens or tokens[0].startswith("$"):
+            continue
+        base = _exe_basename(tokens[0])
+        if base and base not in _POWERSHELL_CMDLETS:
+            gov_exe = base
+    return gov_exe or "shell_exec"
 
 
 def _calls(session: SessionIR) -> list[ToolCallIR]:
@@ -228,6 +302,8 @@ def evaluate_diagnostics(session: SessionIR, workspace: Path | None = None) -> l
             return f"path:{canonicalize_path(call.target_path, workspace)}"
         if call.mcp_tool_name:
             return f"mcp:{call.mcp_namespace or 'unknown'}:{call.mcp_tool_name}"
+        if call.canonical_kind == "shell_exec":
+            return f"shell:{_shell_fail_exe(call)}"
         return f"kind:{call.canonical_kind}"
     for group in _groups(calls, fail_key, lambda c: c.is_error or c.is_denied):
         key = fail_key(group[0])
@@ -333,7 +409,7 @@ def evaluate_diagnostics(session: SessionIR, workspace: Path | None = None) -> l
         high_error_rate = sub.error_count > 0 and (
             sub.tool_call_count == 0 or (sub.error_count >= 3 and sub.error_count * 4 >= sub.tool_call_count * 3)
         )
-        if sub.status != "completed" or sub.denial_count > 0 or high_error_rate:
+        if (not sub.in_flight and sub.status != "completed") or sub.denial_count > 0 or high_error_rate:
             norm_sub = normalize_session_id(sub.session_id)
             dispatch = next(
                 (call for call in reversed(calls) if call.subagent_session_id and normalize_session_id(call.subagent_session_id) == norm_sub),

@@ -132,9 +132,15 @@ def test_failure_thrash_requires_three_calls() -> None:
 def test_h03_uses_path_then_mcp_then_kind_precedence() -> None:
     path_calls = [_call(i, "mcp_call", error=True, namespace="x", tool="same", path="one.py") for i in range(1, 4)]
     mcp_calls = [_call(i, "mcp_call", error=True, namespace="x", tool="same") for i in range(4, 7)]
-    kind_calls = [_call(i, "shell_exec", error=True) for i in range(7, 10)]
-    keys = {finding.evidence["group_key"] for finding in evaluate_diagnostics(_session(path_calls + mcp_calls + kind_calls)) if finding.id == HEURISTIC_IDS[2] and finding.evidence.get("branch") == "4a"}
-    assert keys == {"path:one.py", "mcp:x:same", "kind:shell_exec"}
+    shell_calls = [_call(i, "shell_exec", error=True, params={"command": '& "C:\\Program Files\\Git\\bin\\git.exe" push'}) for i in range(7, 10)]
+    distinct_shell = [
+        _call(10, "shell_exec", error=True, params={"command": "pytest -q"}),
+        _call(11, "shell_exec", error=True, params={"command": "mypy src"}),
+        _call(12, "shell_exec", error=True, params={"command": "ruff check"}),
+    ]
+    kind_calls = [_call(i, "other", error=True) for i in range(13, 16)]
+    keys = {finding.evidence["group_key"] for finding in evaluate_diagnostics(_session(path_calls + mcp_calls + shell_calls + distinct_shell + kind_calls)) if finding.id == HEURISTIC_IDS[2] and finding.evidence.get("branch") == "4a"}
+    assert keys == {"path:one.py", "mcp:x:same", "shell:git", "kind:other"}
     cross_turn = [_call(1, "shell_exec", turn=1, error=True), _call(2, "shell_exec", turn=1, error=True), _call(3, "shell_exec", turn=2, error=True), _call(4, "shell_exec", turn=2, error=True), _call(5, "shell_exec", turn=2, error=True)]
     thrash = [f for f in evaluate_diagnostics(_session(cross_turn)) if f.id == HEURISTIC_IDS[2]]
     assert len(thrash) == 1 and thrash[0].evidence["call_indexes"] == [1, 2, 3, 4, 5]
@@ -225,13 +231,15 @@ def test_h07_child_and_sequential_waves() -> None:
     minor_err_child = SubagentSummaryIR("ok-child", 1, None, None, None, "completed", None, 1, 10, 1, 0)
     half_err_child = SubagentSummaryIR("half-err-child", 1, None, None, None, "completed", None, 1, 4, 2, 0)
     high_err_child = SubagentSummaryIR("high-err-child", 1, None, None, None, "completed", None, 1, 4, 3, 0)
+    in_flight_child = SubagentSummaryIR("active-child", 1, "explore", None, None, None, None, 1, 2, 0, 0, in_flight=True)
     dispatch = _call(1, "subagent_dispatch", child="child", started=0, ended=5)
     wave = [_call(i, "subagent_dispatch", started=(i - 1) * 10, ended=(i - 1) * 10 + 5) for i in range(2, 5)]
-    findings = evaluate_diagnostics(_session([dispatch, *wave], subagents=[child, minor_err_child, half_err_child, high_err_child]))
+    findings = evaluate_diagnostics(_session([dispatch, *wave], subagents=[child, minor_err_child, half_err_child, high_err_child, in_flight_child]))
     h07_keys = {f.finding_key for f in findings if f.id == HEURISTIC_IDS[6]}
     assert {"H07_SUBAGENT_DISPATCH_ANOMALY:sub:child", "H07_SUBAGENT_DISPATCH_ANOMALY:sub:high-err-child", "H07_SUBAGENT_DISPATCH_ANOMALY:turn:1"} <= h07_keys
     assert "H07_SUBAGENT_DISPATCH_ANOMALY:sub:ok-child" not in h07_keys
     assert "H07_SUBAGENT_DISPATCH_ANOMALY:sub:half-err-child" not in h07_keys
+    assert "H07_SUBAGENT_DISPATCH_ANOMALY:sub:active-child" not in h07_keys
     parallel = [_call(i, "subagent_dispatch", started=0, ended=10) for i in range(1, 4)]
     for call in parallel:
         call.model_call_id = "batch"

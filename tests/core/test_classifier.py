@@ -36,6 +36,12 @@ def test_source_hooks_file_is_not_customization() -> None:
     assert session.customizations == []
 
 
+def test_web_access_classifies_to_web_access_semantic_class() -> None:
+    session = _session(_call("web_access", "https://example.com"))
+    classify_session(session)
+    assert session.turns[0].tool_calls[0].semantic_class == "web-access"
+
+
 def test_classify_session_is_idempotent_and_tracks_reads(tmp_path: Path) -> None:
     workspace = tmp_path
     skill = workspace / ".cursor" / "skills" / "demo" / "SKILL.md"

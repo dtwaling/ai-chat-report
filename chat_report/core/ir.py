@@ -44,6 +44,7 @@ class SemanticToolClass(str, Enum):
     SUBAGENT_DISPATCH = "subagent-dispatch"
     DYNAMIC_TOOL_DISCOVERY = "dynamic-tool-discovery"
     MCP_CALL = "mcp-call"
+    WEB_ACCESS = "web-access"
     AGENT_WORKFLOW = "agent-workflow"
 
 
@@ -184,6 +185,7 @@ class SubagentSummaryIR:
     denial_count: int
     skills_read: list[str] = field(default_factory=list)
     rules_read: list[str] = field(default_factory=list)
+    in_flight: bool = False
 
 
 @dataclass
@@ -226,6 +228,8 @@ class SessionIR:
     attribution: AttributionIR | None = None
     warnings: list[dict[str, str]] = field(default_factory=list)
     resolved_from: dict[str, str] | None = None
+    in_flight: bool = False
+    captured_at_ms: int | None = None
 
 
 @dataclass

@@ -88,7 +88,8 @@ def _assert_session_block(session: Any) -> None:
         "files_removed", "stop_hook_loop_count", "orphan_bubble_count", "token_breakdown",
         "customizations", "subagents", "attribution", "resolved_from",
     }
-    _keys(session, expected, "session")
+    optional = {"in_flight", "captured_at_ms"}
+    _assert(expected <= set(session) <= expected | optional, f"session keys differ: {set(session) ^ expected}")
     for key in ("schema_version", "harness", "harness_version", "session_id", "session_id_normalized"):
         _str(session[key], f"session.{key}")
     _assert(session["schema_version"] == SCHEMA_VERSION, f"session.schema_version must be {SCHEMA_VERSION}")
@@ -99,6 +100,14 @@ def _assert_session_block(session: Any) -> None:
     _assert(session["max_mode"] is None or isinstance(session["max_mode"], bool), "session.max_mode must be bool or null")
     for key in ("started_at_ms", "ended_at_ms", "duration_ms"):
         _int(session[key], f"session.{key}", nullable=True)
+    if "in_flight" in session:
+        _assert(isinstance(session["in_flight"], bool), "session.in_flight must be bool")
+        if session["in_flight"] is True:
+            _assert(session["status"] is None, "in-flight session.status must be null")
+            _assert(session["ended_at_ms"] is None, "in-flight session.ended_at_ms must be null")
+            _assert(session["duration_ms"] is None, "in-flight session.duration_ms must be null")
+    if "captured_at_ms" in session:
+        _int(session["captured_at_ms"], "session.captured_at_ms", nullable=True)
     for key in ("total_lines_added", "total_lines_removed", "stop_hook_loop_count", "orphan_bubble_count"):
         _int(session[key], f"session.{key}")
     _assert(isinstance(session["files_added"], list) and all(isinstance(x, str) for x in session["files_added"]), "session.files_added invalid")
@@ -114,7 +123,30 @@ def _assert_session_block(session: Any) -> None:
         _keys(values, {"tokens", "chars"}, f"by_category.{category}")
         _int(values["tokens"], f"by_category.{category}.tokens")
         _int(values["chars"], f"by_category.{category}.chars")
-    _assert(isinstance(token["top_context_nodes"], list), "top_context_nodes invalid")
+    _assert(
+        isinstance(token["top_context_nodes"], list) and len(token["top_context_nodes"]) <= 15,
+        "top_context_nodes invalid",
+    )
+    for node in token["top_context_nodes"]:
+        _assert(isinstance(node, dict), "top_context_nodes item must be an object")
+        for nkey in ("estimatedTokens", "tokens", "characterCount", "chars"):
+            if nkey in node and node[nkey] is not None:
+                _int(node[nkey], f"top_context_nodes.{nkey}")
+    def _node_sort_key(n: dict[str, Any]) -> tuple[int, int, str]:
+        est = n.get("estimatedTokens")
+        tok = est if isinstance(est, int) and not isinstance(est, bool) else (
+            n["tokens"] if isinstance(n.get("tokens"), int) and not isinstance(n.get("tokens"), bool) else 0
+        )
+        ch = n.get("characterCount")
+        chr_val = ch if isinstance(ch, int) and not isinstance(ch, bool) else (
+            n["chars"] if isinstance(n.get("chars"), int) and not isinstance(n.get("chars"), bool) else 0
+        )
+        return (-tok, -chr_val, str(n.get("id") or n.get("label") or ""))
+    _assert(
+        [_node_sort_key(n) for n in token["top_context_nodes"]]
+        == sorted(_node_sort_key(n) for n in token["top_context_nodes"]),
+        "top_context_nodes not sorted",
+    )
     _assert(isinstance(session["customizations"], list), "customizations invalid")
     for ref in session["customizations"]:
         _keys(ref, {"kind", "path", "source", "turn_index"}, "customization")
@@ -123,13 +155,20 @@ def _assert_session_block(session: Any) -> None:
         _str(ref["path"], "customization.path")
         _int(ref["turn_index"], "customization.turn_index", nullable=True)
     _assert(isinstance(session["subagents"], list), "subagents invalid")
+    sub_expected = {"session_id", "parent_turn_index", "subagent_type", "name", "model_name", "status", "duration_ms", "turn_count", "tool_call_count", "error_count", "denial_count", "skills_read", "rules_read"}
     for subagent in session["subagents"]:
-        _keys(subagent, {"session_id", "parent_turn_index", "subagent_type", "name", "model_name", "status", "duration_ms", "turn_count", "tool_call_count", "error_count", "denial_count", "skills_read", "rules_read"}, "subagent")
+        _assert(isinstance(subagent, dict), "subagent must be an object")
+        _assert(sub_expected <= set(subagent) <= sub_expected | {"in_flight"}, f"subagent keys differ: {set(subagent) ^ sub_expected}")
         _str(subagent["session_id"], "subagent.session_id")
         for key in ("subagent_type", "name", "model_name", "status"):
             _nullable_str(subagent[key], f"subagent.{key}")
         for key in ("parent_turn_index", "duration_ms"):
             _int(subagent[key], f"subagent.{key}", nullable=True)
+        if "in_flight" in subagent:
+            _assert(isinstance(subagent["in_flight"], bool), "subagent.in_flight must be bool")
+            if subagent["in_flight"] is True:
+                _assert(subagent["status"] is None, "in-flight subagent.status must be null")
+                _assert(subagent["duration_ms"] is None, "in-flight subagent.duration_ms must be null")
         for key in ("turn_count", "tool_call_count", "error_count", "denial_count"):
             _int(subagent[key], f"subagent.{key}")
         for key in ("skills_read", "rules_read"):
@@ -461,18 +500,28 @@ def assert_v2_report_conforms(payload: dict[str, Any]) -> None:
         _assert(isinstance(payload["sessions"], list), "aggregate sessions must be a list")
         _assert(payload["session_count"] == len(payload["sessions"]) >= 2, "aggregate session count must be at least two")
         summary_keys = {"session_id", "session_id_normalized", "title", "model_name", "status", "duration_ms", "total_lines_added", "total_lines_removed", "attribution", "aggregates", "diagnostics"}
+        summary_optional = {"in_flight", "captured_at_ms"}
         for summary in payload["sessions"]:
-            _keys(summary, summary_keys, "aggregate session summary")
+            _assert(isinstance(summary, dict), "aggregate session summary must be an object")
+            _assert(summary_keys <= set(summary) <= summary_keys | summary_optional, f"aggregate session summary keys differ: {set(summary) ^ summary_keys}")
             _str(summary["session_id"], "aggregate session session_id")
             _str(summary["session_id_normalized"], "aggregate session session_id_normalized")
             _assert(summary["session_id_normalized"] == summary["session_id"].strip().lower(), "aggregate session normalized ID mismatch")
             for key in ("title", "model_name", "status"):
                 _nullable_str(summary[key], f"aggregate session {key}")
             _int(summary["duration_ms"], "aggregate session duration_ms", nullable=True)
+            if "in_flight" in summary:
+                _assert(isinstance(summary["in_flight"], bool), "aggregate session in_flight must be bool")
+                if summary["in_flight"] is True:
+                    _assert(summary["status"] is None, "in-flight aggregate session status must be null")
+                    _assert(summary["duration_ms"] is None, "in-flight aggregate session duration_ms must be null")
+            if "captured_at_ms" in summary:
+                _int(summary["captured_at_ms"], "aggregate session captured_at_ms", nullable=True)
             _int(summary["total_lines_added"], "aggregate session total_lines_added")
             _int(summary["total_lines_removed"], "aggregate session total_lines_removed")
             _assert_attribution(summary["attribution"])
             _assert_aggregates(summary["aggregates"], None)
+            _assert(summary["aggregates"]["timing"]["total_session_ms"] == summary["duration_ms"], "aggregate session timing.total_session_ms mismatch")
             _assert_diagnostics(summary["diagnostics"])
         _assert(bool(payload["harness"].strip()), "aggregate harness must be non-empty")
         _assert(bool(payload["harness_version"].strip()), "aggregate harness_version must be non-empty")

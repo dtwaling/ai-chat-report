@@ -53,7 +53,7 @@ def create_synthetic_state_db(
             "createdAt": "2026-01-01T00:00:00Z", "startedAtMs": 1000 + index * 100,
             "completedAtMs": 1050 + index * 100,
             "thinking": {"text": "reasoning"} if not is_user else None,
-            "thinkingDurationMs": 25, "tokenCount": {"inputTokens": 2, "outputTokens": 3},
+            "thinkingDurationMs": 250, "tokenCount": {"inputTokens": 2, "outputTokens": 3},
         }
         if is_user:
             bubble["requestId"] = f"request-{index}"
